@@ -1,0 +1,9 @@
+dependencies:
+  cli:
+    url: github.com/toitlang/pkg-cli
+    version: ^2.6.0
+  host:
+    url: github.com/toitlang/pkg-host
+    version: ^1.16.2
+  json-schema:
+    path: ..

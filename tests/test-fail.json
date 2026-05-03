@@ -1,0 +1,10 @@
+{
+  "JSON-Schema-Test-Suite/tests/draft2020-12/multipleOf.json": {
+    "by small number": {
+      "0.0075 is multiple of 0.0001": true
+    },
+    "small multiple of large integer": {
+      "any integer is a multiple of 1e-8": true
+    }
+  }
+}

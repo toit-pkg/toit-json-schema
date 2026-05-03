@@ -1,0 +1,92 @@
+[
+    {
+        "description": "root pointer ref",
+        "schema": {
+            "$schema": "http://localhost:1234/metaschema-openapi.json",
+            "$ref": "#/$defs/Pet",
+            "$defs": {
+                "Pet": {
+                    "type": "object",
+                    "required": ["petType"],
+                    "properties": {
+                        "petType": { "type": "string" }
+                    },
+                    "discriminator": {
+                        "propertyName": "petType",
+                        "mapping": {
+                            "dog": "#/$defs/Dog",
+                            "cat": "#/$defs/Cat"
+                        }
+                    }
+                },
+                "Dog": {
+                    "allOf": [
+                        {"$ref": "#/$defs/Pet"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "bark": { "type": "string" }
+                            },
+                            "required": ["bark"]
+                        }
+                    ]
+                },
+                "Cat": {
+                    "allOf": [
+                        {"$ref": "#/$defs/Pet"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "hiss": { "type": "string" }
+                            },
+                            "required": ["hiss"]
+                        }
+                    ]
+                }
+
+            }
+        },
+        "tests": [
+            {
+                "description": "dog",
+                "data": {
+                    "petType": "dog",
+                    "bark": "woof"
+                },
+                "valid": true
+            },
+            {
+                "description": "bad dog",
+                "data": {
+                    "petType": "dog",
+                    "foo": "missing bark"
+                },
+                "valid": false
+            },
+            {
+                "description": "cat",
+                "data": {
+                    "petType": "cat",
+                    "hiss": "meow"
+                },
+                "valid": true
+            },
+            {
+                "description": "bad cat",
+                "data": {
+                    "petType": "cat",
+                    "foo": "missing hiss"
+                },
+                "valid": false
+            },
+            {
+                "description": "bad petType",
+                "data": {
+                    "petType": "fish",
+                    "foo": "missing hiss"
+                },
+                "valid": false
+            }
+        ]
+    }
+]

@@ -1,0 +1,59 @@
+[
+    {
+        "description": "root pointer ref",
+        "schema": {
+            "$schema": "http://localhost:1234/metaschema-openapi.json",
+            "discriminator": {
+                "propertyName": "petType"
+            },
+            "oneOf": [
+                { "$ref": "#/$defs/Dog" },
+                { "$ref": "#/$defs/Cat" }
+            ],
+            "$defs": {
+                "Pet": {
+                    "type": "object",
+                    "required": ["petType"],
+                    "properties": {
+                        "petType": { "type": "string" }
+                    }
+                },
+                "Dog": {
+                    "allOf": [
+                        {"$ref": "#/$defs/Pet"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "bark": { "type": "string" }
+                            },
+                            "required": ["bark"]
+                        }
+                    ]
+                },
+                "Cat": {
+                    "allOf": [
+                        {"$ref": "#/$defs/Pet"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "hiss": { "type": "string" }
+                            },
+                            "required": ["hiss"]
+                        }
+                    ]
+                }
+
+            }
+        },
+        "tests": [
+            {
+                "description": "good dog",
+                "data": {
+                    "petType": "Dog",
+                    "bark": "barking"
+                },
+                "valid": true
+            }
+        ]
+    }
+]

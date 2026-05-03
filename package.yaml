@@ -1,0 +1,14 @@
+name: json-schema
+description: JSON Schema tools.
+dependencies:
+  certificate-roots:
+    url: github.com/toitware/toit-cert-roots
+    version: ^1.11.0
+  http:
+    url: github.com/toitlang/pkg-http
+    version: ^2.11.0
+  json-pointer:
+    url: github.com/toitware/toit-json-pointer
+    version: ^1.0.0
+  toit-gen:
+    path: ../toit-gen

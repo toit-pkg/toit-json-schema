@@ -1,0 +1,39 @@
+sdk: ^2.0.0-alpha.188.1
+prefixes:
+  certificate-roots: toit-cert-roots
+  http: pkg-http
+  json-pointer: toit-json-pointer
+  toit-gen: toit-gen
+packages:
+  pkg-fs:
+    url: github.com/toitlang/pkg-fs
+    name: fs
+    version: 2.3.1
+    hash: 60836d4500317af2093d59d50c117d612c33f1fa
+    prefixes:
+      host: pkg-host
+  pkg-host:
+    url: github.com/toitlang/pkg-host
+    name: host
+    version: 1.17.0
+    hash: 05a26b5fa1cc73dc64a5e9cc16c40ae5aa24e0fb
+  pkg-http:
+    url: github.com/toitlang/pkg-http
+    name: http
+    version: 2.11.0
+    hash: d2cdc57270eaafe8df8d8403bf4ebf95415aa0fd
+  toit-cert-roots:
+    url: github.com/toitware/toit-cert-roots
+    name: certificate-roots
+    version: 1.11.0
+    hash: c117dbba4757d7c69e91af7a875ab6989f051a33
+  toit-gen:
+    path: ../toit-gen
+    prefixes:
+      fs: pkg-fs
+      host: pkg-host
+  toit-json-pointer:
+    url: github.com/toitware/toit-json-pointer
+    name: json-pointer
+    version: 1.1.0
+    hash: 4a6e180301d331831d67b514cc893f66a60f0d8e

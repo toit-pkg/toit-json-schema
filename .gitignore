@@ -1,0 +1,7 @@
+.packages/
+/build/
+/tmp/
+/tmp-code.toit
+/JSON-Schema-Test-Suite.config
+.claude/
+.agent/
