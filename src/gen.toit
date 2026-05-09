@@ -517,7 +517,14 @@ populate program/toit-gen.Program schemas/List
       --library-for-uri=library-for-uri
       --class-seed=class-seed
   generator.run schemas
-  return Models generator.class-manager.classes
+  // class-manager.classes also holds entries for schemas that NameVisitor
+  //   reserved a name for but Generator_ never materialised (primitives,
+  //   pure $ref schemas, type:array). Only return classes that ended up
+  //   in a library — otherwise lookup callers can hold a stub whose
+  //   `name` is never assigned.
+  generated := generator.class-manager.classes.filter: | url _ |
+    generator.library-of-class_.contains url
+  return Models generated
 
 /**
 Convenience wrapper around $populate for the single-library case.
