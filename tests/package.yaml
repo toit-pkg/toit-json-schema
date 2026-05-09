@@ -7,3 +7,5 @@ dependencies:
     version: ^1.16.2
   json-schema:
     path: ..
+  toit-gen:
+    path: ../../toit-gen

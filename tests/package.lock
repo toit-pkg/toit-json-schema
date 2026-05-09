@@ -3,6 +3,7 @@ prefixes:
   cli: pkg-cli
   host: pkg-host
   json-schema: ..
+  toit-gen: toit-gen
 packages:
   ..:
     path: ..

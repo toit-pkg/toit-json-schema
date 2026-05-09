@@ -42,8 +42,7 @@ gen invocation/cli.Invocation:
 
   print "Generating Toit code from schema '$schema-path' into '$output-dir/$module'"
 
-  generator := schema-gen.Gen --module=module
-  files := generator.gen [schema]
+  files := schema-gen.gen [schema] --module=module
   directory.mkdir --recursive output-dir
   files.do: | name/string code/string |
     path := "$output-dir/$name"

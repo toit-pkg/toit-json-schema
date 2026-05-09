@@ -15,8 +15,11 @@ import .uri
 
 class ClassManager:
   used/Set ::= {}  // Of string.
+  // The public toit-gen target for each schema URI. For schemas that are used
+  // as allOf $ref parents this is an interface; otherwise it's a regular class.
   classes/Map ::= {:}  // From UriReference to toit-gen.Class.
-  mixins/Map ::= {:}  // From UriReference to toit-gen.Class (kind=MIXIN).
+  // Private impl class for schemas whose public face is an interface.
+  impl-classes/Map ::= {:}  // From UriReference to toit-gen.Class.
   // TODO(florian): "any" shouldn't be a core class.
   any-class/toit-gen.Class ::= toit-gen.Class.core "any"
   list-class/toit-gen.Class ::= toit-gen.Class.core "List"
@@ -43,14 +46,44 @@ class ClassManager:
     classes[url] = clazz
     return clazz
 
-  use-class url/UriReference name/string -> toit-gen.Class:
+  use-class url/UriReference name/string --as-interface/bool=false -> toit-gen.Class:
     if classes.contains url:
       return classes[url]
+
+    if as-interface:
+      attempt := name
+      i := 0
+      while used.contains attempt:
+        attempt = "$name$(i++)"
+      used.add attempt
+      itf := toit-gen.Class attempt --kind=toit-gen.Class.INTERFACE
+      classes[url] = itf
+      // Reserve the private impl class name. Toit treats names ending with
+      // "_" as private to the file. Hyphenate the suffix so toit-gen's
+      // PascalCase namer recognises "Impl" as a separate word ("AImpl_"
+      // instead of "Aimpl_").
+      impl-base := "$(attempt)-Impl"
+      impl-attempt := "$(impl-base)_"
+      j := 0
+      while used.contains impl-attempt:
+        impl-attempt = "$(impl-base)$(j++)_"
+      used.add impl-attempt
+      impl := toit-gen.Class impl-attempt --kind=toit-gen.Class.CLASS --is-private
+      impl-classes[url] = impl
+      return itf
 
     return use-unique_ --url=url name
 
   operator [] url/UriReference -> toit-gen.Class?:
     return classes.get url
+
+  /**
+  Returns the impl class for $url if the schema's public face is an interface,
+    else the public class itself. Generation methods (gen-fields_,
+    gen-class) target this class.
+  */
+  target-class url/UriReference -> toit-gen.Class?:
+    return impl-classes.get url --if-absent=: classes.get url
 
 /**
 A no-op base class for $ActionVisitor.
@@ -147,8 +180,10 @@ Many of these names won't be used, especially the names of
 class NameVisitor extends BaseActionVisitor:
   current-class-name/string? := null
   class-manager/ClassManager
+  needs-interface_/Set  // Of UriReference. Schemas to materialise as interfaces.
 
-  constructor .class-manager:
+  constructor .class-manager --needs-interface/Set:
+    needs-interface_ = needs-interface
 
   visit schema/Schema [--if-no-name] -> none:
     // Try to guess the name from the URL.
@@ -177,7 +212,8 @@ class NameVisitor extends BaseActionVisitor:
   visit schema/Schema --name/string -> none:
     url := schema.absolute-location
     old-name := current-class-name
-    current-class-name = (class-manager.use-class url name).preferred-name
+    as-interface := needs-interface_.contains url
+    current-class-name = (class-manager.use-class url name --as-interface=as-interface).preferred-name
     schema.actions.do: | action/Action |
       action.accept this
     current-class-name = old-name
@@ -212,7 +248,7 @@ class QualifiedType_:
 
   constructor .clazz --.uri=null:
 
-class SchemaType extends BaseActionVisitor:
+class SchemaType:
   schema/Schema
   one-of/X-Of? := null
   all-of/X-Of? := null
@@ -226,8 +262,9 @@ class SchemaType extends BaseActionVisitor:
   discriminator/Discriminator? := null
 
   constructor .schema:
+    builder := SchemaTypeBuilder_ this
     schema.actions.do: | action/Action |
-      action.accept this
+      action.accept builder
 
   url -> UriReference:
     return schema.absolute-location
@@ -337,7 +374,7 @@ class SchemaType extends BaseActionVisitor:
   convert-from-json expr/toit-gen.Expression -> toit-gen.Expression
       --class-manager/ClassManager
       [--gen-ref]
-      :
+  :
     if effective-type == "array" and items and items.items:
       element-type := SchemaType items.items
       if not element-type.is-primitive:
@@ -397,66 +434,107 @@ class SchemaType extends BaseActionVisitor:
     if is-map: return expr
     return toit-gen.Call expr "to-json"
 
+/**
+Populates a $SchemaType's fields by visiting the source schema's actions.
+*/
+class SchemaTypeBuilder_ extends BaseActionVisitor:
+  target/SchemaType
+
+  constructor .target:
+
   visit-Ref action/Ref -> none:
-    ref = action
+    target.ref = action
 
   visit-X-Of x-of/X-Of -> none:
-    if x-of.kind == X-Of.ALL-OF: all-of = x-of
-    else if x-of.kind == X-Of.ANY-OF: any-of = x-of
-    else if x-of.kind == X-Of.ONE-OF: one-of = x-of
+    if x-of.kind == X-Of.ALL-OF: target.all-of = x-of
+    else if x-of.kind == X-Of.ANY-OF: target.any-of = x-of
+    else if x-of.kind == X-Of.ONE-OF: target.one-of = x-of
     else: unreachable
 
   visit-Properties action/Properties -> none:
-    properties = action
+    target.properties = action
 
   visit-Type action/Type -> none:
-    type = action
+    target.type = action
 
   visit-Required action/Required -> none:
-    required = action
+    target.required = action
 
   visit-Items action/Items -> none:
-    items = action
+    target.items = action
 
   visit-Annotation action/Annotation -> none:
     if action.keyword == "description" and action.value is string:
-      description-annotation = action
+      target.description-annotation = action
 
   visit-Discriminator action/Discriminator -> none:
-    discriminator = action
-
-class Gen:
-  module/string
-
-  constructor --.module/string="schema.toit":
-
-  /**
-  Generates Toit code for the given $schemas.
-
-  Returns a map from module filename to generated source code. The keys are
-    the module names supplied at construction time; today the result always
-    contains a single entry, but multi-library output is planned.
-
-  Callers are responsible for writing the returned files to disk.
-  */
-  gen schemas/List -> Map:
-    if schemas.is-empty:
-      throw "Gen.gen requires at least one schema"
-    run := GenRun_ --module=module
-    return run.run_ schemas
+    target.discriminator = action
 
 /**
-Per-run state for a single $Gen.gen invocation.
+Read-only lookup of classes generated by $populate.
 
-Isolating per-run state on its own object means $Gen instances are reusable.
+$lookup-by-uri returns the $toit-gen.Class to use as a type reference for
+  the schema at the given URI, or null if the schema is primitive (no class
+  is generated for primitives).
 */
-class GenRun_:
-  module/string
+class Models:
+  uri-to-class_/Map  // From UriReference to toit-gen.Class.
+
+  constructor .uri-to-class_:
+
+  lookup-by-uri uri/UriReference -> toit-gen.Class?:
+    return uri-to-class_.get uri
+
+  lookup schema/Schema -> toit-gen.Class?:
+    return lookup-by-uri schema.absolute-location
+
+/**
+Generates classes for $schemas into $program, routing each class to a
+  library chosen by $library-for-uri.
+
+$library-for-uri receives a schema's absolute URI and must return the
+  $toit-gen.Library that the generated class should be added to. The library
+  must already belong to $program.
+
+Returns a $Models facade for looking up the generated classes by URI.
+
+Cross-library references generate imports automatically. The caller is
+  responsible for adding the libraries to $program before calling.
+*/
+populate program/toit-gen.Program schemas/List --library-for-uri/Lambda -> Models:
+  if schemas.is-empty:
+    throw "populate requires at least one schema"
+  generator := Generator_ program --library-for-uri=library-for-uri
+  generator.run schemas
+  return Models generator.class-manager.classes
+
+/**
+Convenience wrapper around $populate for the single-library case.
+
+Builds a fresh $toit-gen.Program with one $toit-gen.Library at $module,
+  calls $populate, and returns the rendered file map (filename → source).
+*/
+gen schemas/List --module/string="schema.toit" -> Map:
+  if schemas.is-empty:
+    throw "gen requires at least one schema"
+  program := toit-gen.Program
+  library := toit-gen.Library module
+  program.libraries.add library
+  populate program schemas --library-for-uri=:: library
+  return program.gen --in-memory
+
+/**
+Per-run state for a single $populate invocation. Private impl detail.
+*/
+class Generator_:
+  program/toit-gen.Program
+  library-for-uri_/Lambda
   done/Set ::= {}
   class-manager/ClassManager ::= ClassManager
   schema-types_/Map ::= {:}  // From UriReference to SchemaType.
-  // Schemas that need a mixin generated (because they appear in an allOf).
-  needs-mixin_/Set ::= {}  // Of UriReference.
+  // Schemas that appear as $ref-target in some allOf list. These get a public
+  // interface plus a private impl class.
+  needs-interface_/Set ::= {}  // Of UriReference.
   // Maps oneOf variant schema URLs to their parent oneOf schema URL.
   one-of-parent_/Map ::= {:}  // From UriReference to UriReference.
   // Maps oneOf schema URLs to their discriminator property name.
@@ -465,11 +543,14 @@ class GenRun_:
   one-of-mapping_/Map ::= {:}  // From UriReference to Map<string, UriReference>.
   // Maps schema URLs to Schema objects (populated during run).
   schema-by-url_/Map ::= {:}  // From UriReference to Schema.
-  // TODO(florian): make this a map from uri to library when we
-  // support multiple libraries.
-  out-gen/LibraryGen? := null
+  // Per-library generation state, keyed by toit-gen.Library identity.
+  library-gens_/Map ::= {:}  // From toit-gen.Library to LibraryGen.
+  // Maps each generated class URI to the toit-gen.Library it lives in.
+  // Used by LibraryGen.gen-import_ to emit cross-library imports.
+  library-of-class_/Map ::= {:}  // From UriReference to toit-gen.Library.
 
-  constructor --.module/string:
+  constructor .program --library-for-uri/Lambda:
+    library-for-uri_ = library-for-uri
 
   /**
   Returns a (cached) $SchemaType for $schema.
@@ -501,7 +582,7 @@ class GenRun_:
     library-gen.gen-class type
     return result
 
-  run_ schemas/List -> Map:
+  run schemas/List -> none:
     // TODO(florian): handle dynamic refs.
     // We need to collect all dynamic refs, and all the resource-uris.
     // Then extract the possible target schemas from the store.
@@ -522,7 +603,19 @@ class GenRun_:
     reffed.do: | schema/Schema |
       schema-by-url_[schema.absolute-location] = schema
 
-    name-visitor := NameVisitor class-manager
+    // Identify schemas referenced as allOf parents — they must be generated
+    // as interfaces so descendants can declare type compatibility via
+    // `implements`. (Toit only supports single-inheritance for both classes
+    // and interfaces, so multi-parent allOf can't fit any inheritance chain.)
+    reffed.do: | schema/Schema |
+      type := schema-type schema
+      if type.all-of:
+        type.all-of.subschemas.do: | sub/Schema |
+          sub-type := schema-type sub
+          if sub-type.ref:
+            needs-interface_.add sub-type.ref.target.absolute-location
+
+    name-visitor := NameVisitor class-manager --needs-interface=needs-interface_
     reffed.do: | schema/Schema |
       name-visitor.visit schema --if-no-name=: "Root"
 
@@ -531,17 +624,9 @@ class GenRun_:
     // each schema. Differences arise when a schema has a '$ref', or
     // if a schema represents a primitive type.
 
-    // Analyze schemas for allOf/oneOf patterns.
+    // Analyze schemas for oneOf/anyOf patterns.
     reffed.do: | schema/Schema |
       type := schema-type schema
-      // Mark schemas that appear in allOf as needing mixin generation.
-      if type.all-of:
-        type.all-of.subschemas.do: | sub/Schema |
-          sub-type := schema-type sub
-          if sub-type.ref:
-            needs-mixin_.add sub-type.ref.target.absolute-location
-          else if not sub-type.is-primitive:
-            needs-mixin_.add sub.absolute-location
       // Track oneOf/anyOf: map variants to parent.
       // anyOf is treated identically to oneOf for code generation.
       x-of := type.one-of or type.any-of
@@ -579,29 +664,25 @@ class GenRun_:
                 one-of-parent_[target-url] = parent-url
           one-of-mapping_[parent-url] = mapping
 
-    program := toit-gen.Program
-
-    // TODO(florian): split into multiple libraries.
-    library := toit-gen.Library module
-    program.libraries.add library
-    out-gen = LibraryGen library --run=this
-
     reffed.do: | schema/Schema |
       type := schema-type schema
       gen-type type
 
-    return program.gen --in-memory
-
   library-gen-for-url_ uri/UriReference -> LibraryGen:
-    // For now, all generated classes go into the same library.
-    return out-gen
+    library/toit-gen.Library := library-for-uri_.call uri
+    library-of-class_[uri] = library
+    return library-gens_.get library --init=:
+      LibraryGen library --run=this
 
 class LibraryGen:
   library/toit-gen.Library
-  run_/GenRun_
+  run_/Generator_
   core-import/toit-gen.Import
+  // Imports from this library to other libraries within the same program,
+  // keyed by target Library identity.
+  cross-library-imports_/Map ::= {:}  // From toit-gen.Library to toit-gen.Import.
 
-  constructor .library --run/GenRun_:
+  constructor .library --run/Generator_:
     run_ = run
     core-import = toit-gen.Import ["core"]
     library.imports.add core-import
@@ -610,17 +691,21 @@ class LibraryGen:
     return run_.class-manager
 
   /**
-  Generates fields for the given $type's properties on $target.
+  Generates fields for $source-type's properties on $target.
 
-  The $target is either a class or a mixin. Mixin fields cannot use
-    late-init (`:= ?`), so they fall back to type-appropriate zero defaults.
-  Returns the list of generated fields, in declaration order.
+  Skips property names already in $declared (e.g. inherited from a super-class
+    chain or contributed by an earlier source on this class). Adds newly-declared
+    names to $declared.
+
+  Returns triples [prop-name/string, prop-type/SchemaType, field/VarDefinition]
+    for each newly-declared field, in property iteration order. Skipped
+    properties simply do not appear in the result.
   */
-  gen-fields_ type/SchemaType --target/toit-gen.Class -> List:
-    is-mixin := target.kind == toit-gen.Class.MIXIN
-    fields := []
-    if not type.properties or not type.properties.properties: return fields
-    type.properties.properties.do: | prop-name/string schema/Schema |
+  gen-fields_ source-type/SchemaType --target/toit-gen.Class --declared/Set -> List:
+    triples := []
+    if not source-type.properties or not source-type.properties.properties: return triples
+    source-type.properties.properties.do: | prop-name/string schema/Schema |
+      if declared.contains prop-name: continue.do
       prop-type := run_.schema-type schema
       field-qualified-type := run_.gen-type prop-type
       field-type-import := gen-import_ field-qualified-type
@@ -630,19 +715,11 @@ class LibraryGen:
       else:
         field-type-ref = toit-gen.Ref field-qualified-type.clazz
 
-      is-required := false
-      if type.required:
-        is-required = type.required.properties.contains prop-name
-      // Mixin fields cannot use `:= ?` (Toit limitation), so they always get
-      // a type-appropriate zero default. Plain class fields use `:= ?` for
-      // required and `T? := null` for optional.
-      initial/toit-gen.Expression := ?
-      if is-mixin:
-        initial = default-value-for-type_ prop-type
-      else if is-required:
-        initial = toit-gen.LateInitialized
-      else:
-        initial = toit-gen.Literal null
+      is-required := source-type.required != null
+          and source-type.required.properties.contains prop-name
+      initial/toit-gen.Expression := is-required
+          ? toit-gen.LateInitialized
+          : toit-gen.Literal null
       field := toit-gen.VarDefinition.field prop-name
           --type=field-type-ref
           --is-nullable=not is-required
@@ -651,26 +728,24 @@ class LibraryGen:
       if prop-type.description-annotation:
         field.toitdoc = [prop-type.description-annotation.value]
       target.fields.add field
-      fields.add field
-    return fields
+      triples.add [prop-name, prop-type, field]
+      declared.add prop-name
+    return triples
 
   /**
-  Generates constructor body statements that initialize $fields from
+  Generates constructor body statements that initialize $triples from
     a `data/Map` parameter.
-
-  $fields is parallel to the property iteration order of $type's $Properties.
   */
-  gen-constructor-body_ type/SchemaType --fields/List --data-arg/toit-gen.VarDefinition --body/toit-gen.Sequence -> none:
-    if not type.properties or not type.properties.properties: return
-    field-index := 0
-    type.properties.properties.do: | prop-name/string schema/Schema |
-      prop-type := run_.schema-type schema
-      field := fields[field-index++]
+  gen-constructor-body_ triples/List --data-arg/toit-gen.VarDefinition --body/toit-gen.Sequence -> none:
+    triples.do: | triple/List |
+      prop-name/string := triple[0]
+      prop-type/SchemaType := triple[1]
+      field := triple[2]
       index := toit-gen.Index (toit-gen.Ref data-arg) (toit-gen.Literal prop-name)
       converted := prop-type.convert-from-json index
           --class-manager=class-manager
-          --gen-ref=: | type/SchemaType |
-            qualified := run_.gen-type type
+          --gen-ref=: | t/SchemaType |
+            qualified := run_.gen-type t
             imp := gen-import_ qualified
             if imp:
               toit-gen.ImportedRef imp qualified.clazz
@@ -679,16 +754,14 @@ class LibraryGen:
       body.assign field converted
 
   /**
-  Generates to-json map entries for the given $type's properties.
-
-  $fields is parallel to the property iteration order of $type's $Properties.
+  Appends to-json map entries for $triples (one entry per triple).
   */
-  gen-to-json-entries_ type/SchemaType --fields/List --keys/List --values/List -> none:
-    if not type.properties or not type.properties.properties: return
-    field-index := 0
-    type.properties.properties.do: | prop-name/string schema/Schema |
-      prop-type := run_.schema-type schema
-      field-ref := toit-gen.Ref fields[field-index++]
+  gen-to-json-entries_ triples/List --keys/List --values/List -> none:
+    triples.do: | triple/List |
+      prop-name/string := triple[0]
+      prop-type/SchemaType := triple[1]
+      field := triple[2]
+      field-ref := toit-gen.Ref field
       converted := prop-type.convert-to-json field-ref
       keys.add (toit-gen.Literal prop-name)
       values.add converted
@@ -699,110 +772,82 @@ class LibraryGen:
       gen-one-of-base_ type
       return
 
-    qualified-clazz := type.type class-manager
-    clazz := qualified-clazz.clazz
+    // The public face: an interface for schemas referenced as allOf parents,
+    // a regular class otherwise. The impl class is the same when the public
+    // face is a class; for interfaces, it's the private impl class.
+    public-clazz := class-manager[type.url]
+    impl-clazz := class-manager.target-class type.url
+    is-interface := public-clazz != impl-clazz
+
     if type.description-annotation:
-      clazz.toitdoc = [type.description-annotation.value]
+      public-clazz.toitdoc = [type.description-annotation.value]
 
-    // If this schema is a oneOf variant, extend the parent base class.
-    parent-url := run_.one-of-parent_.get type.url
-    if parent-url:
-      parent-class := class-manager[parent-url]
+    // OneOf variants extend the abstract oneOf base — keep that single
+    // super-class line. Note: oneOf bases never appear as allOf parents in
+    // practice (they're abstract), so this doesn't conflict with the
+    // interface-based allOf design.
+    one-of-parent-url := run_.one-of-parent_.get type.url
+    if one-of-parent-url:
+      parent-class := class-manager[one-of-parent-url]
       if parent-class:
-        clazz.super-class = toit-gen.Ref parent-class
+        impl-clazz.super-class = toit-gen.Ref parent-class
 
-    needs-mixin := run_.needs-mixin_.contains type.url
-    mixin-clazz/toit-gen.Class? := null
-
-    if needs-mixin:
-      // Generate the mixin with fields.
-      mixin-name := "$(clazz.preferred-name)Mixin"
-      mixin-clazz = toit-gen.Class mixin-name --kind=toit-gen.Class.MIXIN
-      class-manager.mixins[type.url] = mixin-clazz
-      gen-fields_ type --target=mixin-clazz
-      library.classes.add mixin-clazz
-
-      // The class extends Object with the mixin.
-      object-class := toit-gen.Class.core "Object"
-      clazz.super-class = toit-gen.Ref object-class
-      clazz.mixins.add (toit-gen.Ref mixin-clazz)
-
-    // Handle allOf: set up inheritance and mixins from $ref subschemas,
-    // and collect inline property subschemas for field merging.
-    all-of-inline-types := []  // SchemaTypes from inline allOf subschemas.
-    // Types from allOf $ref targets, for collecting parent fields in to-json.
-    all-of-ref-types := []  // SchemaTypes of resolved $ref targets.
-    has-super := false
+    // Collect direct allOf $ref parents in declaration order. The first one
+    // becomes the `extends` parent for the public interface (its members
+    // propagate without redeclaration); the rest go in `implements` (those
+    // members must be redeclared in the interface body).
+    direct-parent-interfaces := []
+    first-parent-type/SchemaType? := null
     if type.all-of:
       type.all-of.subschemas.do: | sub/Schema |
         sub-type := run_.schema-type sub
-        if sub-type.ref:
-          // A $ref subschema → inheritance or mixin.
-          ref-target-type := run_.schema-type sub-type.ref.target
-          run_.gen-type ref-target-type
-          target-url := sub-type.ref.target.absolute-location
-          target-class := class-manager[target-url]
-          all-of-ref-types.add ref-target-type
-          if not has-super:
-            // First $ref → superclass.
-            clazz.super-class = toit-gen.Ref target-class
-            has-super = true
-          else:
-            // Additional $refs → mixin.
-            target-mixin := class-manager.mixins.get target-url
-            if target-mixin:
-              clazz.mixins.add (toit-gen.Ref target-mixin)
-        else if sub-type.properties and sub-type.properties.properties:
-          // Inline property subschema → merge fields.
-          all-of-inline-types.add sub-type
+        if not sub-type.ref: continue.do
+        ref-target := sub-type.ref.target
+        ref-target-type := run_.schema-type ref-target
+        run_.gen-type ref-target-type
+        parent-itf := class-manager[ref-target.absolute-location]
+        if parent-itf and parent-itf.kind == toit-gen.Class.INTERFACE:
+          direct-parent-interfaces.add parent-itf
+          if not first-parent-type: first-parent-type = ref-target-type
 
-    // Own fields, plus fields from each inline allOf subschema, kept separate
-    // so each can be paired with its source $SchemaType for from-json/to-json.
-    own-fields/List := needs-mixin
-        ? mixin-clazz.fields.copy
-        : gen-fields_ type --target=clazz
-    // List of [SchemaType, fields] pairs from inline allOf subschemas, in order.
-    inline-fields-by-type := all-of-inline-types.map: | sub-type/SchemaType |
-      [sub-type, gen-fields_ sub-type --target=clazz]
+    if is-interface:
+      // First parent → extends (single-inheritance, members propagate).
+      // Remaining parents → implements (require redeclaration).
+      if not direct-parent-interfaces.is-empty:
+        public-clazz.super-class = toit-gen.Ref direct-parent-interfaces.first
+        for i := 1; i < direct-parent-interfaces.size; i++:
+          public-clazz.interfaces.add (toit-gen.Ref direct-parent-interfaces[i])
+      impl-clazz.interfaces.add (toit-gen.Ref public-clazz)
+    else:
+      // Leaf class: list direct parent interfaces. Transitive compatibility
+      // comes from the parent interfaces' own extends/implements chain.
+      direct-parent-interfaces.do: | itf/toit-gen.Class |
+        impl-clazz.interfaces.add (toit-gen.Ref itf)
 
-    // Generate from-json constructor.
+    // Collect all property sources transitively. Order: own → allOf $ref
+    // parents (recursive) → inline allOf subschemas (recursive). Dedup by
+    // property name (first wins).
+    declared/Set := {}
+    triples := []
+    collect-fields-recursive_ type --target=impl-clazz --declared=declared --triples=triples
+
+    // Generate from-json constructor on the impl class.
     data-arg := toit-gen.VarDefinition.parameter "data"
         --type=toit-gen.ImportedRef core-import class-manager.map-class
     constructor-body := toit-gen.Sequence
-    is-one-of-variant := run_.one-of-parent_.contains type.url
-    if has-super:
-      // Call super.from-json first (required before accessing instance members).
-      constructor-body.add
-          toit-gen.Statement (toit-gen.Call toit-gen.Super "from-json" --arguments=[toit-gen.Ref data-arg])
-    else if is-one-of-variant:
+    if one-of-parent-url:
       // OneOf variant: call super.from-sub_ (the abstract base's private constructor).
       constructor-body.add
           toit-gen.Statement (toit-gen.Call toit-gen.Super "from-sub_")
-    gen-constructor-body_ type --fields=own-fields --data-arg=data-arg --body=constructor-body
-    inline-fields-by-type.do: | pair/List |
-      gen-constructor-body_ pair[0]
-          --fields=pair[1]
-          --data-arg=data-arg
-          --body=constructor-body
+    gen-constructor-body_ triples --data-arg=data-arg --body=constructor-body
     constr := toit-gen.Function.constr --name="from-json" --parameters=[data-arg] constructor-body
-    clazz.members.add constr
+    impl-clazz.members.add constr
 
-    // Generate to-json method.
-    // For allOf, include all fields (parent mixin fields are accessible)
-    // in a single map literal.
+    // Generate to-json on the impl class.
     to-json-body := toit-gen.Sequence
     map-keys := []
     map-values := []
-    // First add parent fields from allOf $refs (accessible via mixin).
-    all-of-ref-types.do: | ref-type/SchemaType |
-      ref-url := ref-type.url
-      ref-mixin := class-manager.mixins.get ref-url
-      if ref-mixin:
-        gen-to-json-entries_ ref-type --fields=ref-mixin.fields --keys=map-keys --values=map-values
-    // Then own fields.
-    gen-to-json-entries_ type --fields=own-fields --keys=map-keys --values=map-values
-    inline-fields-by-type.do: | pair/List |
-      gen-to-json-entries_ pair[0] --fields=pair[1] --keys=map-keys --values=map-values
+    gen-to-json-entries_ triples --keys=map-keys --values=map-values
     map-literal := toit-gen.MapLiteral map-keys map-values
     to-json-body.ret map-literal
     to-json-map-ref := toit-gen.ImportedRef core-import class-manager.map-class
@@ -810,23 +855,96 @@ class LibraryGen:
         --parameters=[]
         --return-type=to-json-map-ref
         to-json-body
-    clazz.members.add to-json-method
+    impl-clazz.members.add to-json-method
 
-    library.classes.add clazz
+    if is-interface:
+      // Members inherited from the extends parent's chain don't need to be
+      // redeclared on this interface; only members from `implements` parents
+      // and own/inline must be declared.
+      inherited-via-extends/Set := {}
+      if first-parent-type:
+        collect-property-names-recursive_ first-parent-type --result=inherited-via-extends
+      gen-interface-members_ public-clazz
+          --triples=triples
+          --impl=impl-clazz
+          --skip=inherited-via-extends
+      library.classes.add public-clazz
+    library.classes.add impl-clazz
 
   /**
-  Returns a default value expression for the given $type.
+  Walks $type's allOf chain transitively, generating fields on $target for
+    every property encountered (deduped by name). $declared is updated with
+    the names of newly-declared fields, and $triples receives the
+    `[prop-name, SchemaType, field]` entries in declaration order.
 
-  Mixin fields cannot use late-init (`:= ?`), so all fields use
-    type-appropriate defaults instead.
+  Order: $type's own properties first, then each allOf \$ref parent (recursing
+    into the parent's own allOf chain), then each inline allOf subschema
+    (also recursing).
   */
-  static default-value-for-type_ type/SchemaType -> toit-gen.Expression:
-    effective := type.effective-type
-    if effective == "string": return toit-gen.Literal ""
-    if effective == "integer" or effective == "number": return toit-gen.Literal 0
-    if effective == "boolean": return toit-gen.Literal false
-    if type.is-numeric-union: return toit-gen.Literal 0
-    return toit-gen.Literal null
+  collect-fields-recursive_ type/SchemaType
+      --target/toit-gen.Class
+      --declared/Set
+      --triples/List
+      -> none:
+    triples.add-all (gen-fields_ type --target=target --declared=declared)
+    if not type.all-of: return
+    type.all-of.subschemas.do: | sub/Schema |
+      sub-type := run_.schema-type sub
+      if sub-type.ref:
+        ref-target-type := run_.schema-type sub-type.ref.target
+        collect-fields-recursive_ ref-target-type --target=target --declared=declared --triples=triples
+      else if sub-type.properties and sub-type.properties.properties:
+        collect-fields-recursive_ sub-type --target=target --declared=declared --triples=triples
+
+  /**
+  Walks $type's allOf chain transitively and adds every property name it
+    encounters to $result. Used to compute the set of members an interface
+    inherits via `extends` (so the interface body can skip redeclaring them).
+  */
+  collect-property-names-recursive_ type/SchemaType --result/Set -> none:
+    if type.properties and type.properties.properties:
+      type.properties.properties.do: | name/string _ |
+        result.add name
+    if not type.all-of: return
+    type.all-of.subschemas.do: | sub/Schema |
+      sub-type := run_.schema-type sub
+      if sub-type.ref:
+        collect-property-names-recursive_ (run_.schema-type sub-type.ref.target) --result=result
+      else if sub-type.properties:
+        collect-property-names-recursive_ sub-type --result=result
+
+  /**
+  Populates an interface declaration with abstract getter signatures (one per
+    property in $triples whose name is not in $skip) and a factory
+    `constructor.from-json` that returns a fresh $impl instance.
+
+  $skip holds names inherited via the interface's `extends` parent — those
+    don't need to be redeclared.
+
+  Toit interfaces accept method signatures (no body, no `abstract` keyword)
+    plus factory constructors with bodies; the patched toit-gen renders these
+    correctly when the enclosing class has `kind == INTERFACE`.
+  */
+  gen-interface-members_ itf/toit-gen.Class --triples/List --impl/toit-gen.Class --skip/Set -> none:
+    triples.do: | triple/List |
+      prop-name/string := triple[0]
+      if skip.contains prop-name: continue.do
+      field/toit-gen.VarDefinition := triple[2]
+      // Reuse the impl field's type ref for the getter return type.
+      getter := toit-gen.Function prop-name
+          --parameters=[]
+          --return-type=field.type
+          --is-abstract
+          null
+      itf.members.add getter
+    // Factory: constructor.from-json data/Map -> Itf  (return Impl_.from-json data)
+    data-arg := toit-gen.VarDefinition.parameter "data"
+        --type=toit-gen.ImportedRef core-import class-manager.map-class
+    factory-body := toit-gen.Sequence
+    factory-body.ret
+        toit-gen.Call (toit-gen.Ref impl) "from-json" --arguments=[toit-gen.Ref data-arg]
+    factory := toit-gen.Function.constr --name="from-json" --parameters=[data-arg] factory-body
+    itf.members.add factory
 
   /**
   Generates an abstract base class for a oneOf schema with discriminator.
@@ -880,14 +998,17 @@ class LibraryGen:
               toit-gen.StringInterpolation ["Unknown $disc-prop: ", toit-gen.Ref disc-var, ""]
     else:
       // Heuristic dispatch: check for required/unique fields.
+      // Discriminator-less oneOf is supported only when each variant is
+      // statically distinguishable. We fail at codegen otherwise rather than
+      // emit dispatch that's wrong on edge cases at runtime.
+      check-heuristic-decidable_ type mapping
       mapping.do: | _/string variant-url/UriReference |
         variant-class := class-manager[variant-url]
         if not variant-class: continue.do
-        // Find a distinguishing required field for this variant.
         variant-type := find-variant-type_ variant-url
         if not variant-type: continue.do
         distinguishing-field := find-distinguishing-field_ variant-type mapping
-        if not distinguishing-field: continue.do
+        // check-heuristic-decidable_ has already verified this is non-null.
         condition := toit-gen.Call (toit-gen.Ref data-arg) "contains"
             --arguments=[toit-gen.Literal distinguishing-field]
         then-body := toit-gen.Sequence
@@ -908,6 +1029,51 @@ class LibraryGen:
     schema := run_.schema-by-url_.get variant-url
     if not schema: return null
     return run_.schema-type schema
+
+  /**
+  Validates that a discriminator-less oneOf is statically decidable.
+
+  Throws at codegen if:
+  - Any variant lacks a distinguishing field (so dispatch would silently drop
+    the variant at runtime).
+  - One variant's required-property set is a strict subset of another's
+    (so an input matching the larger variant would also satisfy the smaller
+    variant's `contains` heuristic, making dispatch order-dependent).
+
+  Both conditions are user-fixable: add a discriminator on $base-type.
+  */
+  check-heuristic-decidable_ base-type/SchemaType mapping/Map -> none:
+    variant-types/List := []
+    mapping.do: | _/string variant-url/UriReference |
+      variant-type := find-variant-type_ variant-url
+      if variant-type: variant-types.add variant-type
+
+    // Strict-subset detection across required sets.
+    variant-types.do: | a/SchemaType |
+      a-required := required-set_ a
+      if a-required.is-empty: continue.do
+      variant-types.do: | b/SchemaType |
+        if identical a b: continue.do
+        b-required := required-set_ b
+        if b-required.size <= a-required.size: continue.do
+        if is-subset_ a-required b-required:
+          throw "Discriminator-less oneOf at $(base-type.url) is ambiguous: variant $(a.url)'s required set is a subset of $(b.url)'s. Add a discriminator."
+
+    // Each variant must have a distinguishing field.
+    variant-types.do: | v/SchemaType |
+      distinguishing := find-distinguishing-field_ v mapping
+      if not distinguishing:
+        throw "Discriminator-less oneOf at $(base-type.url) cannot statically distinguish variant $(v.url). Add a discriminator."
+
+  static required-set_ type/SchemaType -> Set:
+    if not type.required: return {}
+    result := {}
+    type.required.properties.do: result.add it
+    return result
+
+  static is-subset_ a/Set b/Set -> bool:
+    a.do: if not b.contains it: return false
+    return true
 
   /**
   Finds a field name that distinguishes this variant from others.
@@ -942,6 +1108,16 @@ class LibraryGen:
       // `any` is a builtin keyword; it can't be imported from core.
       if qualified.clazz == class-manager.any-class: return null
       return core-import
-    // For now, all generated classes go into the same library.
-    return null
+    target-library/toit-gen.Library? := run_.library-of-class_.get uri
+    if not target-library or target-library == library: return null
+    return cross-library-imports_.get target-library --init=:
+      // Build path segments for the target library. Toit imports use dotted
+      // module paths; we strip a leading "src/" and any ".toit" suffix.
+      path := target-library.path
+      if path.starts-with "src/": path = path[4..]
+      if path.ends-with ".toit": path = path[..path.size - 5]
+      segments := path.split "/"
+      imp := toit-gen.Import segments
+      library.imports.add imp
+      imp
 

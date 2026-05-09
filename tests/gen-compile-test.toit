@@ -109,8 +109,7 @@ test-each tmp-dir/string -> none:
     name/string := pair[0]
     schema-json/Map := pair[1]
     schema := json-schema.build schema-json
-    generator := schema-gen.Gen --module="schema.toit"
-    files := generator.gen [schema]
+    files := schema-gen.gen [schema] --module="schema.toit"
     case-dir := "$tmp-dir/$name"
     directory.mkdir --recursive case-dir
     files.do: | filename/string code/string |
