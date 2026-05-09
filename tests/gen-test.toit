@@ -33,6 +33,7 @@ main:
   test-deeply-nested
   test-populate-multi-library
   test-models-lookup
+  test-populate-class-seed
   test-allof-multiple-refs-with-overlap
   test-oneof-undecidable-no-distinguishing-field
   test-oneof-required-subset-ambiguous
@@ -577,6 +578,27 @@ test-models-lookup:
   clazz-by-uri := models.lookup-by-uri json-schema-doc.schema.absolute-location
   expect (clazz-by-uri == clazz)
       --message="lookup and lookup-by-uri should return the same Class"
+
+test-populate-class-seed:
+  // Verifies that --class-seed lets a caller pre-name a schema by URI,
+  // overriding the auto-derived name. This is what openapi-gen needs for
+  // inline schemas where the JSON-pointer-derived name ("schema") is
+  // useless.
+  json-schema-doc := json-schema.build {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": { "name": { "type": "string" } },
+  }
+  program := toit-gen.Program
+  lib := toit-gen.Library "schema.toit"
+  program.libraries.add lib
+  uri := json-schema-doc.schema.absolute-location
+  models := schema-gen.populate program [json-schema-doc]
+      --library-for-uri=:: lib
+      --class-seed={uri: "Pet"}
+  clazz := models.lookup-by-uri uri
+  expect (clazz != null) --message="Expected lookup to return a Class for the seeded schema"
+  expect-equals "Pet" clazz.preferred-name
 
 test-allof-multiple-refs-with-overlap:
   // allOf with two $ref parents. Both parents become interfaces; C is a

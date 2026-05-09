@@ -496,15 +496,26 @@ $library-for-uri receives a schema's absolute URI and must return the
   $toit-gen.Library that the generated class should be added to. The library
   must already belong to $program.
 
+$class-seed lets callers pre-name schemas whose auto-derived name is not
+  useful (e.g. inline OpenAPI schemas at locations like
+  `#/paths/.../requestBody/content/application~1json/schema`, where the
+  JSON-pointer-derived name would be "schema"). The map is keyed by a
+  schema's absolute URI; values are preferred class names. Names that
+  collide with auto-derived names are disambiguated automatically.
+
 Returns a $Models facade for looking up the generated classes by URI.
 
 Cross-library references generate imports automatically. The caller is
   responsible for adding the libraries to $program before calling.
 */
-populate program/toit-gen.Program schemas/List --library-for-uri/Lambda -> Models:
+populate program/toit-gen.Program schemas/List
+    --library-for-uri/Lambda
+    --class-seed/Map?=null -> Models:
   if schemas.is-empty:
     throw "populate requires at least one schema"
-  generator := Generator_ program --library-for-uri=library-for-uri
+  generator := Generator_ program
+      --library-for-uri=library-for-uri
+      --class-seed=class-seed
   generator.run schemas
   return Models generator.class-manager.classes
 
@@ -530,7 +541,7 @@ class Generator_:
   program/toit-gen.Program
   library-for-uri_/Lambda
   done/Set ::= {}
-  class-manager/ClassManager ::= ClassManager
+  class-manager/ClassManager
   schema-types_/Map ::= {:}  // From UriReference to SchemaType.
   // Schemas that appear as $ref-target in some allOf list. These get a public
   // interface plus a private impl class.
@@ -549,8 +560,9 @@ class Generator_:
   // Used by LibraryGen.gen-import_ to emit cross-library imports.
   library-of-class_/Map ::= {:}  // From UriReference to toit-gen.Library.
 
-  constructor .program --library-for-uri/Lambda:
+  constructor .program --library-for-uri/Lambda --class-seed/Map?=null:
     library-for-uri_ = library-for-uri
+    class-manager = ClassManager --class-seed=class-seed
 
   /**
   Returns a (cached) $SchemaType for $schema.
