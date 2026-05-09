@@ -7,11 +7,11 @@ import json-schema
 import json-schema.gen as schema-gen
 
 /// Builds a schema from a JSON map and generates code in memory.
-/// Returns a Map from path to generated code string.
-gen-code schema-json/Map --out-path/string="test.toit" -> Map:
+/// Returns a Map from module filename to generated code string.
+gen-code schema-json/Map --module/string="test.toit" -> Map:
   schema := json-schema.build schema-json
-  generator := schema-gen.Gen out-path
-  return generator.gen [schema] --in-memory
+  generator := schema-gen.Gen --module=module
+  return generator.gen [schema]
 
 main:
   test-simple-object
@@ -26,6 +26,11 @@ main:
   test-oneof-no-discriminator
   test-anyof
   test-oneof-with-allof-variants
+  test-nullable-type-union
+  test-numeric-type-union
+  test-incompatible-type-union
+  test-kebab-case-property
+  test-deeply-nested
 
 test-simple-object:
   result := gen-code {
@@ -45,11 +50,9 @@ test-simple-object:
   // The generated code should contain a class with name and age fields.
   expect (code.contains "name")
   expect (code.contains "age")
-  expect (code.contains "name/string")
-  expect (code.contains "age/int")
-  // All fields use type-appropriate defaults (for mixin compatibility).
-  expect (code.contains "name/string := \"\"")
-  expect (code.contains "age/int := 0")
+  // Required fields use late-init; optional fields are nullable.
+  expect (code.contains "name/string := ?")
+  expect (code.contains "age/int? := null")
   // Constructor is named from-json.
   expect (code.contains "constructor.from-json")
 
@@ -402,3 +405,112 @@ test-oneof-with-allof-variants:
   // Dog should have its own fields.
   expect (code.contains "bark/string")
       --message="Expected Dog to have bark field"
+
+test-nullable-type-union:
+  // ["string","null"] should resolve to string (not any).
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "name": { "type": ["string", "null"] },
+    },
+  }
+  code := result["test.toit"]
+  expect (code.contains "name/string")
+      --message="Expected nullable string union to resolve to string"
+  expect (not code.contains "name/any")
+      --message="Nullable union should not degrade to any"
+
+test-numeric-type-union:
+  // ["integer","number"] should resolve to num (not any).
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "amount": { "type": ["integer", "number"] },
+      "amount-or-null": { "type": ["integer", "number", "null"] },
+    },
+  }
+  code := result["test.toit"]
+  expect (code.contains "amount/num")
+      --message="Expected numeric union to resolve to num"
+  expect (code.contains "amount-or-null/num")
+      --message="Expected numeric+null union to resolve to num"
+
+test-incompatible-type-union:
+  // ["string","integer"] has no good Toit type — falls through to any.
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "value": { "type": ["string", "integer"] },
+    },
+  }
+  code := result["test.toit"]
+  expect (code.contains "value/any")
+      --message="Expected mixed-type union to fall through to any"
+
+test-kebab-case-property:
+  // Property names with kebab/snake/camel case map to kebab-cased Toit fields
+  // (Toit naming convention), but to-json preserves the original JSON keys.
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "user-name": { "type": "string" },
+      "lastModified": { "type": "string" },
+      "is_admin": { "type": "boolean" },
+    },
+  }
+  code := result["test.toit"]
+  expect (code.contains "user-name/string")
+      --message="Expected kebab-cased Toit field"
+  expect (code.contains "last-modified/string")
+      --message="Expected camelCase property normalized to kebab-case"
+  expect (code.contains "is-admin/bool")
+      --message="Expected snake_case property normalized to kebab-case"
+  // from-json reads using the original JSON key (not the Toit field name).
+  expect (code.contains "data[\"lastModified\"]")
+      --message="Expected from-json to read with original camel key"
+  expect (code.contains "data[\"is_admin\"]")
+      --message="Expected from-json to read with original snake key"
+  // to-json emits the original JSON key, preserving round-trip fidelity.
+  expect (code.contains "\"user-name\"")
+      --message="Expected to-json to emit original kebab key"
+  expect (code.contains "\"lastModified\"")
+      --message="Expected to-json to emit original camel key"
+  expect (code.contains "\"is_admin\"")
+      --message="Expected to-json to emit original snake key"
+
+test-deeply-nested:
+  // Three-level nested objects: each layer should get its own class
+  // named by the path from the root.
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "config": {
+        "type": "object",
+        "properties": {
+          "database": {
+            "type": "object",
+            "properties": {
+              "host": { "type": "string" },
+            },
+          },
+        },
+      },
+    },
+  }
+  code := result["test.toit"]
+  expect (code.contains "class Root")
+      --message="Expected Root class"
+  expect (code.contains "class RootConfig")
+      --message="Expected RootConfig class for second level"
+  expect (code.contains "class RootConfigDatabase")
+      --message="Expected RootConfigDatabase class for third level"
+  // Each level's from-json should reference the next level's class.
+  expect (code.contains "RootConfig.from-json")
+      --message="Expected Root.from-json to delegate to RootConfig"
+  expect (code.contains "RootConfigDatabase.from-json")
+      --message="Expected RootConfig.from-json to delegate to RootConfigDatabase"

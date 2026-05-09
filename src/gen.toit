@@ -52,7 +52,39 @@ class ClassManager:
   operator [] url/UriReference -> toit-gen.Class?:
     return classes.get url
 
-class CollectRefTargetsVisitor implements ActionVisitor:
+/**
+A no-op base class for $ActionVisitor.
+
+Subclasses override only the visit methods they care about.
+*/
+class BaseActionVisitor implements ActionVisitor:
+  visit-Ref _/Ref -> none:
+  visit-X-Of _/X-Of -> none:
+  visit-Not _/Not -> none:
+  visit-IfThenElse _/IfThenElse -> none:
+  visit-DependentSchemas _/DependentSchemas -> none:
+  visit-Properties _/Properties -> none:
+  visit-PropertyNames _/PropertyNames -> none:
+  visit-Contains _/Contains -> none:
+  visit-Type _/Type -> none:
+  visit-Enum _/Enum -> none:
+  visit-Const _/Const -> none:
+  visit-NumComparison _/NumComparison -> none:
+  visit-StringLength _/StringLength -> none:
+  visit-ArrayLength _/ArrayLength -> none:
+  visit-UniqueItems _/UniqueItems -> none:
+  visit-Required _/Required -> none:
+  visit-ObjectSize _/ObjectSize -> none:
+  visit-Items _/Items -> none:
+  visit-Pattern _/Pattern -> none:
+  visit-DependentRequired _/DependentRequired -> none:
+  visit-UnevaluatedProperties _/UnevaluatedProperties -> none:
+  visit-UnevaluatedItems _/UnevaluatedItems -> none:
+  visit-Annotation _/Annotation -> none:
+  visit-Format _/Format -> none:
+  visit-Discriminator _/Discriminator -> none:
+
+class CollectRefTargetsVisitor extends BaseActionVisitor:
   ref-targets/Set ::= {}  // Of Schema.
   visited_/Set ::= {}  // Of Schema.
 
@@ -71,8 +103,6 @@ class CollectRefTargetsVisitor implements ActionVisitor:
     x-of.subschemas.do: | schema/Schema |
       visit schema
 
-  visit-Not not_/Not -> none: return
-
   visit-IfThenElse if-then-else/IfThenElse -> none:
     visit if-then-else.condition-subschema
     visit if-then-else.then-subschema
@@ -90,47 +120,17 @@ class CollectRefTargetsVisitor implements ActionVisitor:
       ref-targets.add properties.additional
       visit properties.additional
 
-  visit-PropertyNames property-names/PropertyNames -> none: return
-
-  visit-Contains contains/Contains -> none: return
-
-  visit-Type type/Type -> none: return
-
-  visit-Enum enum_/Enum -> none: return
-
-  visit-Const const/Const -> none: return
-
-  visit-NumComparison num-comparison/NumComparison -> none: return
-
-  visit-StringLength string-length/StringLength -> none: return
-
-  visit-ArrayLength array-length/ArrayLength -> none: return
-
-  visit-UniqueItems unique-items/UniqueItems -> none: return
-
-  visit-Required required/Required -> none: return
-
-  visit-ObjectSize object-size/ObjectSize -> none: return
-
   visit-Items items/Items -> none:
     if items.prefix-items and not items.prefix-items.is-empty:
       items.prefix-items.do: | schema/Schema |
         visit schema
     visit items.items
 
-  visit-Pattern pattern/Pattern -> none: return
-
-  visit-DependentRequired dependent-required/DependentRequired -> none: return
-
   visit-UnevaluatedProperties unevaluated-properties/UnevaluatedProperties -> none:
     visit unevaluated-properties.subschema
 
   visit-UnevaluatedItems unevaluated-items/UnevaluatedItems -> none:
     visit unevaluated-items.subschema
-
-  visit-Annotation annotation/Annotation -> none: return
-
-  visit-Format format/Format -> none: return
 
   visit-Discriminator discriminator/Discriminator -> none:
     if discriminator.resolved-mapping:
@@ -144,7 +144,7 @@ Each schema gets a name that could be used as a Toit class name.
 Many of these names won't be used, especially the names of
   schemas that represent primitive types.
 */
-class NameVisitor implements ActionVisitor:
+class NameVisitor extends BaseActionVisitor:
   current-class-name/string? := null
   class-manager/ClassManager
 
@@ -182,15 +182,9 @@ class NameVisitor implements ActionVisitor:
       action.accept this
     current-class-name = old-name
 
-  visit-Ref ref/Ref -> none:
-    // Do nothing.
-
   visit-X-Of x-of/X-Of -> none:
     x-of.subschemas.do: | schema/Schema |
       visit schema --nested-name=""
-
-  visit-Not not_/Not -> none:
-    // Do nothing.
 
   visit-IfThenElse if-then-else/IfThenElse -> none:
     visit if-then-else.condition-subschema --nested-name=""
@@ -208,45 +202,9 @@ class NameVisitor implements ActionVisitor:
     if properties.additional:
       visit properties.additional --nested-name="Value"
 
-  visit-PropertyNames _/PropertyNames -> none: return
-
-  visit-Contains _/Contains -> none: return
-
-  visit-Type _/Type -> none: return
-
-  visit-Enum _/Enum -> none: return
-
-  visit-Const _/Const -> none: return
-
-  visit-NumComparison _/NumComparison -> none: return
-
-  visit-StringLength _/StringLength -> none: return
-
-  visit-ArrayLength _/ArrayLength -> none: return
-
-  visit-UniqueItems _/UniqueItems -> none: return
-
-  visit-Required _/Required -> none: return
-
-  visit-ObjectSize _/ObjectSize -> none: return
-
   visit-Items items/Items -> none:
     if items.items:
       visit items.items --nested-name="Element"
-
-  visit-Pattern _/Pattern -> none: return
-
-  visit-DependentRequired _/DependentRequired -> none: return
-
-  visit-UnevaluatedProperties _/UnevaluatedProperties -> none: return
-
-  visit-UnevaluatedItems _/UnevaluatedItems -> none: return
-
-  visit-Annotation _/Annotation -> none: return
-
-  visit-Format _/Format -> none: return
-
-  visit-Discriminator _/Discriminator -> none: return
 
 class QualifiedType_:
   uri/UriReference?  // The JSON-Schema URL of the type, or null if Core.
@@ -254,7 +212,7 @@ class QualifiedType_:
 
   constructor .clazz --.uri=null:
 
-class SchemaType implements ActionVisitor:
+class SchemaType extends BaseActionVisitor:
   schema/Schema
   one-of/X-Of? := null
   all-of/X-Of? := null
@@ -281,6 +239,41 @@ class SchemaType implements ActionVisitor:
     if accepted-types.size != 1: return null
     return accepted-types.first
 
+  /**
+  The schema's effective type for code generation purposes.
+
+  Returns the single type when there is one, or the single non-null type
+    when the schema's `type` keyword is `["T","null"]` (treated as nullable T).
+  Returns "null" if the schema's only declared type is "null".
+  Returns null when the schema declares multiple non-null types or no type.
+  */
+  effective-type -> string?:
+    if ref: return (SchemaType ref.target).effective-type
+    if not type: return null
+    non-null := type.types.filter: it != "null"
+    if non-null.is-empty:
+      return type.types.contains "null" ? "null" : null
+    if non-null.size == 1: return non-null.first
+    return null
+
+  /**
+  Whether the schema's `type` keyword permits null.
+  */
+  is-type-nullable -> bool:
+    if ref: return (SchemaType ref.target).is-type-nullable
+    if not type: return false
+    return type.types.contains "null"
+
+  /**
+  Whether the schema's `type` keyword is a union of numeric types (and possibly null).
+  */
+  is-numeric-union -> bool:
+    if ref: return (SchemaType ref.target).is-numeric-union
+    if not type: return false
+    non-null := type.types.filter: it != "null"
+    if non-null.size < 2: return false
+    return non-null.every: it == "integer" or it == "number"
+
   is-map -> bool:
     if ref: return (SchemaType ref.target).is-map
     if not type: return false
@@ -304,7 +297,7 @@ class SchemaType implements ActionVisitor:
           return QualifiedType_ class-manager.any-class
         on-stack.add current-type.url
       return current-type.type class-manager
-    type-string := single-type
+    type-string := effective-type
     if type-string:
       if type-string == "null":
         return QualifiedType_ class-manager.null-class
@@ -321,13 +314,15 @@ class SchemaType implements ActionVisitor:
         return QualifiedType_ class-manager.string-class
       if type-string == "integer":
         return QualifiedType_ class-manager.int-class
+    if is-numeric-union:
+      return QualifiedType_ class-manager.num-class
     if one-of or all-of or any-of or properties:
       return QualifiedType_ class-manager[url] --uri=url
     return QualifiedType_ class-manager.any-class
 
   is-primitive -> bool:
-    type-string := single-type
-    if not type-string: return false
+    type-string := effective-type
+    if not type-string: return is-numeric-union
     return type-string == "null" or
         type-string == "boolean" or
         type-string == "number" or
@@ -335,7 +330,7 @@ class SchemaType implements ActionVisitor:
         type-string == "integer"
 
   is-object -> bool:
-    type-string := single-type
+    type-string := effective-type
     if not type-string: return false
     return type-string == "object"
 
@@ -343,7 +338,7 @@ class SchemaType implements ActionVisitor:
       --class-manager/ClassManager
       [--gen-ref]
       :
-    if single-type == "array" and items and items.items:
+    if effective-type == "array" and items and items.items:
       element-type := SchemaType items.items
       if not element-type.is-primitive:
         it-def := toit-gen.VarDefinition.it
@@ -379,7 +374,7 @@ class SchemaType implements ActionVisitor:
     `.to-json` call for objects and typed arrays.
   */
   convert-to-json expr/toit-gen.Expression -> toit-gen.Expression:
-    if single-type == "array" and items and items.items:
+    if effective-type == "array" and items and items.items:
       element-type := SchemaType items.items
       if not element-type.is-primitive:
         it-def := toit-gen.VarDefinition.it
@@ -411,61 +406,55 @@ class SchemaType implements ActionVisitor:
     else if x-of.kind == X-Of.ONE-OF: one-of = x-of
     else: unreachable
 
-  visit-AllOf action/X-Of -> none:
-    all-of = action
-
-  visit-AnyOf action/X-Of -> none:
-    any-of = action
-
-  visit-OneOf action/X-Of -> none:
-    one-of = action
-
-  visit-Not _/Not -> none: return
-  visit-IfThenElse _/IfThenElse -> none: return
-  visit-DependentSchemas _/DependentSchemas -> none: return
-
   visit-Properties action/Properties -> none:
     properties = action
-
-  visit-PropertyNames _/PropertyNames -> none: return
-  visit-Contains _/Contains -> none: return
 
   visit-Type action/Type -> none:
     type = action
 
-  visit-Enum _/Enum -> none: return
-  visit-Const _/Const -> none: return
-  visit-NumComparison _/NumComparison -> none: return
-  visit-StringLength _/StringLength -> none: return
-  visit-ArrayLength _/ArrayLength -> none: return
-  visit-UniqueItems _/UniqueItems -> none: return
-
   visit-Required action/Required -> none:
     required = action
-
-  visit-ObjectSize _/ObjectSize -> none: return
 
   visit-Items action/Items -> none:
     items = action
 
-  visit-Pattern _/Pattern -> none: return
-  visit-DependentRequired _/DependentRequired -> none: return
-  visit-UnevaluatedProperties _/UnevaluatedProperties -> none: return
-  visit-UnevaluatedItems _/UnevaluatedItems -> none: return
   visit-Annotation action/Annotation -> none:
-    if action.keyword == "description" and
-        action.value is string:
+    if action.keyword == "description" and action.value is string:
       description-annotation = action
 
-  visit-Format _/Format -> none: return
   visit-Discriminator action/Discriminator -> none:
     discriminator = action
 
 class Gen:
-  out-path/string
+  module/string
+
+  constructor --.module/string="schema.toit":
+
+  /**
+  Generates Toit code for the given $schemas.
+
+  Returns a map from module filename to generated source code. The keys are
+    the module names supplied at construction time; today the result always
+    contains a single entry, but multi-library output is planned.
+
+  Callers are responsible for writing the returned files to disk.
+  */
+  gen schemas/List -> Map:
+    if schemas.is-empty:
+      throw "Gen.gen requires at least one schema"
+    run := GenRun_ --module=module
+    return run.run_ schemas
+
+/**
+Per-run state for a single $Gen.gen invocation.
+
+Isolating per-run state on its own object means $Gen instances are reusable.
+*/
+class GenRun_:
+  module/string
   done/Set ::= {}
-  schema-to-clazz/Map ::= {:}
   class-manager/ClassManager ::= ClassManager
+  schema-types_/Map ::= {:}  // From UriReference to SchemaType.
   // Schemas that need a mixin generated (because they appear in an allOf).
   needs-mixin_/Set ::= {}  // Of UriReference.
   // Maps oneOf variant schema URLs to their parent oneOf schema URL.
@@ -474,13 +463,22 @@ class Gen:
   one-of-discriminator_/Map ::= {:}  // From UriReference to string.
   // Maps oneOf schema URLs to discriminator value → variant URL.
   one-of-mapping_/Map ::= {:}  // From UriReference to Map<string, UriReference>.
-  // Maps schema URLs to Schema objects (populated during gen).
+  // Maps schema URLs to Schema objects (populated during run).
   schema-by-url_/Map ::= {:}  // From UriReference to Schema.
   // TODO(florian): make this a map from uri to library when we
   // support multiple libraries.
   out-gen/LibraryGen? := null
 
-  constructor .out-path:
+  constructor --.module/string:
+
+  /**
+  Returns a (cached) $SchemaType for $schema.
+
+  Avoids reconstructing $SchemaType objects (each one re-runs the action visitor).
+  */
+  schema-type schema/Schema -> SchemaType:
+    return schema-types_.get schema.absolute-location --init=:
+      SchemaType schema
 
   gen-type type/SchemaType -> QualifiedType_:
     result := type.type class-manager
@@ -490,7 +488,7 @@ class Gen:
     done.add type.url
 
     if type.ref:
-      gen-type (SchemaType type.ref.target)
+      gen-type (schema-type type.ref.target)
       return result
 
     if type.type and type.type.types != ["object"]:
@@ -503,10 +501,7 @@ class Gen:
     library-gen.gen-class type
     return result
 
-  gen schemas/List --in-memory/bool=false -> Map?:
-    if schemas.is-empty:
-      throw "UNIMPLEMENTED"
-
+  run_ schemas/List -> Map:
     // TODO(florian): handle dynamic refs.
     // We need to collect all dynamic refs, and all the resource-uris.
     // Then extract the possible target schemas from the store.
@@ -538,11 +533,11 @@ class Gen:
 
     // Analyze schemas for allOf/oneOf patterns.
     reffed.do: | schema/Schema |
-      type := SchemaType schema
+      type := schema-type schema
       // Mark schemas that appear in allOf as needing mixin generation.
       if type.all-of:
         type.all-of.subschemas.do: | sub/Schema |
-          sub-type := SchemaType sub
+          sub-type := schema-type sub
           if sub-type.ref:
             needs-mixin_.add sub-type.ref.target.absolute-location
           else if not sub-type.is-primitive:
@@ -563,7 +558,7 @@ class Gen:
           else:
             // No explicit mapping — derive from variant schema names.
             x-of.subschemas.do: | sub/Schema |
-              sub-type := SchemaType sub
+              sub-type := schema-type sub
               if sub-type.ref:
                 target-url := sub-type.ref.target.absolute-location
                 target-class := class-manager[target-url]
@@ -575,7 +570,7 @@ class Gen:
           // No discriminator — register variants for heuristic dispatch.
           mapping := {:}
           x-of.subschemas.do: | sub/Schema |
-            sub-type := SchemaType sub
+            sub-type := schema-type sub
             if sub-type.ref:
               target-url := sub-type.ref.target.absolute-location
               target-class := class-manager[target-url]
@@ -587,22 +582,15 @@ class Gen:
     program := toit-gen.Program
 
     // TODO(florian): split into multiple libraries.
-    library := toit-gen.Library out-path
+    library := toit-gen.Library module
     program.libraries.add library
-    out-gen = LibraryGen library --program-gen=this
+    out-gen = LibraryGen library --run=this
 
     reffed.do: | schema/Schema |
-      type := SchemaType schema
+      type := schema-type schema
       gen-type type
 
-    file-map := program.gen --in-memory
-    if in-memory: return file-map
-    file-map.do: | path/string code/string |
-      print "path: $path"
-      print code
-      print "=============================="
-      print
-    return null
+    return program.gen --in-memory
 
   library-gen-for-url_ uri/UriReference -> LibraryGen:
     // For now, all generated classes go into the same library.
@@ -610,28 +598,31 @@ class Gen:
 
 class LibraryGen:
   library/toit-gen.Library
-  program-gen/Gen
+  run_/GenRun_
   core-import/toit-gen.Import
 
-  constructor .library --.program-gen/Gen:
+  constructor .library --run/GenRun_:
+    run_ = run
     core-import = toit-gen.Import ["core"]
     library.imports.add core-import
 
   class-manager -> ClassManager:
-    return program-gen.class-manager
+    return run_.class-manager
 
   /**
   Generates fields for the given $type's properties on $target.
 
-  The $target is either a class or a mixin.
-  Returns the list of generated fields.
+  The $target is either a class or a mixin. Mixin fields cannot use
+    late-init (`:= ?`), so they fall back to type-appropriate zero defaults.
+  Returns the list of generated fields, in declaration order.
   */
   gen-fields_ type/SchemaType --target/toit-gen.Class -> List:
+    is-mixin := target.kind == toit-gen.Class.MIXIN
     fields := []
     if not type.properties or not type.properties.properties: return fields
     type.properties.properties.do: | prop-name/string schema/Schema |
-      prop-type := SchemaType schema
-      field-qualified-type := program-gen.gen-type prop-type
+      prop-type := run_.schema-type schema
+      field-qualified-type := run_.gen-type prop-type
       field-type-import := gen-import_ field-qualified-type
       field-type-ref/toit-gen.Ref := ?
       if field-type-import:
@@ -642,7 +633,16 @@ class LibraryGen:
       is-required := false
       if type.required:
         is-required = type.required.properties.contains prop-name
-      initial := default-value-for-type_ prop-type
+      // Mixin fields cannot use `:= ?` (Toit limitation), so they always get
+      // a type-appropriate zero default. Plain class fields use `:= ?` for
+      // required and `T? := null` for optional.
+      initial/toit-gen.Expression := ?
+      if is-mixin:
+        initial = default-value-for-type_ prop-type
+      else if is-required:
+        initial = toit-gen.LateInitialized
+      else:
+        initial = toit-gen.Literal null
       field := toit-gen.VarDefinition.field prop-name
           --type=field-type-ref
           --is-nullable=not is-required
@@ -657,18 +657,20 @@ class LibraryGen:
   /**
   Generates constructor body statements that initialize $fields from
     a `data/Map` parameter.
+
+  $fields is parallel to the property iteration order of $type's $Properties.
   */
   gen-constructor-body_ type/SchemaType --fields/List --data-arg/toit-gen.VarDefinition --body/toit-gen.Sequence -> none:
     if not type.properties or not type.properties.properties: return
     field-index := 0
     type.properties.properties.do: | prop-name/string schema/Schema |
-      prop-type := SchemaType schema
+      prop-type := run_.schema-type schema
       field := fields[field-index++]
       index := toit-gen.Index (toit-gen.Ref data-arg) (toit-gen.Literal prop-name)
       converted := prop-type.convert-from-json index
           --class-manager=class-manager
           --gen-ref=: | type/SchemaType |
-            qualified := program-gen.gen-type type
+            qualified := run_.gen-type type
             imp := gen-import_ qualified
             if imp:
               toit-gen.ImportedRef imp qualified.clazz
@@ -678,12 +680,14 @@ class LibraryGen:
 
   /**
   Generates to-json map entries for the given $type's properties.
+
+  $fields is parallel to the property iteration order of $type's $Properties.
   */
   gen-to-json-entries_ type/SchemaType --fields/List --keys/List --values/List -> none:
     if not type.properties or not type.properties.properties: return
     field-index := 0
     type.properties.properties.do: | prop-name/string schema/Schema |
-      prop-type := SchemaType schema
+      prop-type := run_.schema-type schema
       field-ref := toit-gen.Ref fields[field-index++]
       converted := prop-type.convert-to-json field-ref
       keys.add (toit-gen.Literal prop-name)
@@ -691,7 +695,7 @@ class LibraryGen:
 
   gen-class type/SchemaType -> none:
     // Check if this is a oneOf base schema.
-    if program-gen.one-of-mapping_.contains type.url:
+    if run_.one-of-mapping_.contains type.url:
       gen-one-of-base_ type
       return
 
@@ -701,13 +705,13 @@ class LibraryGen:
       clazz.toitdoc = [type.description-annotation.value]
 
     // If this schema is a oneOf variant, extend the parent base class.
-    parent-url := program-gen.one-of-parent_.get type.url
+    parent-url := run_.one-of-parent_.get type.url
     if parent-url:
       parent-class := class-manager[parent-url]
       if parent-class:
         clazz.super-class = toit-gen.Ref parent-class
 
-    needs-mixin := program-gen.needs-mixin_.contains type.url
+    needs-mixin := run_.needs-mixin_.contains type.url
     mixin-clazz/toit-gen.Class? := null
 
     if needs-mixin:
@@ -731,11 +735,11 @@ class LibraryGen:
     has-super := false
     if type.all-of:
       type.all-of.subschemas.do: | sub/Schema |
-        sub-type := SchemaType sub
+        sub-type := run_.schema-type sub
         if sub-type.ref:
           // A $ref subschema → inheritance or mixin.
-          ref-target-type := SchemaType sub-type.ref.target
-          program-gen.gen-type ref-target-type
+          ref-target-type := run_.schema-type sub-type.ref.target
+          run_.gen-type ref-target-type
           target-url := sub-type.ref.target.absolute-location
           target-class := class-manager[target-url]
           all-of-ref-types.add ref-target-type
@@ -752,22 +756,20 @@ class LibraryGen:
           // Inline property subschema → merge fields.
           all-of-inline-types.add sub-type
 
-    // Generate fields on the class itself (or use mixin fields for constructor).
-    fields/List := ?
-    if needs-mixin:
-      // Fields are on the mixin; the class references them.
-      fields = mixin-clazz.fields.copy
-    else:
-      fields = gen-fields_ type --target=clazz
-    // Also add fields from inline allOf subschemas.
-    all-of-inline-types.do: | sub-type/SchemaType |
-      fields.add-all (gen-fields_ sub-type --target=clazz)
+    // Own fields, plus fields from each inline allOf subschema, kept separate
+    // so each can be paired with its source $SchemaType for from-json/to-json.
+    own-fields/List := needs-mixin
+        ? mixin-clazz.fields.copy
+        : gen-fields_ type --target=clazz
+    // List of [SchemaType, fields] pairs from inline allOf subschemas, in order.
+    inline-fields-by-type := all-of-inline-types.map: | sub-type/SchemaType |
+      [sub-type, gen-fields_ sub-type --target=clazz]
 
     // Generate from-json constructor.
     data-arg := toit-gen.VarDefinition.parameter "data"
         --type=toit-gen.ImportedRef core-import class-manager.map-class
     constructor-body := toit-gen.Sequence
-    is-one-of-variant := program-gen.one-of-parent_.contains type.url
+    is-one-of-variant := run_.one-of-parent_.contains type.url
     if has-super:
       // Call super.from-json first (required before accessing instance members).
       constructor-body.add
@@ -776,13 +778,10 @@ class LibraryGen:
       // OneOf variant: call super.from-sub_ (the abstract base's private constructor).
       constructor-body.add
           toit-gen.Statement (toit-gen.Call toit-gen.Super "from-sub_")
-    gen-constructor-body_ type --fields=fields --data-arg=data-arg --body=constructor-body
-    // Also init fields from inline allOf subschemas.
-    all-of-inline-types.do: | sub-type/SchemaType |
-      inline-fields := clazz.fields.filter:
-        sub-type.properties.properties.contains it.preferred-name
-      gen-constructor-body_ sub-type
-          --fields=inline-fields
+    gen-constructor-body_ type --fields=own-fields --data-arg=data-arg --body=constructor-body
+    inline-fields-by-type.do: | pair/List |
+      gen-constructor-body_ pair[0]
+          --fields=pair[1]
           --data-arg=data-arg
           --body=constructor-body
     constr := toit-gen.Function.constr --name="from-json" --parameters=[data-arg] constructor-body
@@ -801,11 +800,9 @@ class LibraryGen:
       if ref-mixin:
         gen-to-json-entries_ ref-type --fields=ref-mixin.fields --keys=map-keys --values=map-values
     // Then own fields.
-    gen-to-json-entries_ type --fields=fields --keys=map-keys --values=map-values
-    all-of-inline-types.do: | sub-type/SchemaType |
-      inline-fields := clazz.fields.filter:
-        sub-type.properties.properties.contains it.preferred-name
-      gen-to-json-entries_ sub-type --fields=inline-fields --keys=map-keys --values=map-values
+    gen-to-json-entries_ type --fields=own-fields --keys=map-keys --values=map-values
+    inline-fields-by-type.do: | pair/List |
+      gen-to-json-entries_ pair[0] --fields=pair[1] --keys=map-keys --values=map-values
     map-literal := toit-gen.MapLiteral map-keys map-values
     to-json-body.ret map-literal
     to-json-map-ref := toit-gen.ImportedRef core-import class-manager.map-class
@@ -824,10 +821,11 @@ class LibraryGen:
     type-appropriate defaults instead.
   */
   static default-value-for-type_ type/SchemaType -> toit-gen.Expression:
-    single := type.single-type
-    if single == "string": return toit-gen.Literal ""
-    if single == "integer" or single == "number": return toit-gen.Literal 0
-    if single == "boolean": return toit-gen.Literal false
+    effective := type.effective-type
+    if effective == "string": return toit-gen.Literal ""
+    if effective == "integer" or effective == "number": return toit-gen.Literal 0
+    if effective == "boolean": return toit-gen.Literal false
+    if type.is-numeric-union: return toit-gen.Literal 0
     return toit-gen.Literal null
 
   /**
@@ -856,8 +854,8 @@ class LibraryGen:
     clazz.members.add abstract-to-json
 
     // Factory constructor.from-json that dispatches to variants.
-    disc-prop := program-gen.one-of-discriminator_.get type.url
-    mapping := program-gen.one-of-mapping_[type.url]
+    disc-prop := run_.one-of-discriminator_.get type.url
+    mapping := run_.one-of-mapping_[type.url]
     data-arg := toit-gen.VarDefinition.parameter "data"
         --type=toit-gen.ImportedRef core-import class-manager.map-class
     factory-body := toit-gen.Sequence
@@ -907,9 +905,9 @@ class LibraryGen:
   Finds the SchemaType for a variant URL.
   */
   find-variant-type_ variant-url/UriReference -> SchemaType?:
-    schema := program-gen.schema-by-url_.get variant-url
+    schema := run_.schema-by-url_.get variant-url
     if not schema: return null
-    return SchemaType schema
+    return run_.schema-type schema
 
   /**
   Finds a field name that distinguishes this variant from others.
@@ -940,7 +938,10 @@ class LibraryGen:
 
   gen-import_ qualified/QualifiedType_ -> toit-gen.Import?:
     uri := qualified.uri
-    if not uri: return core-import
+    if not uri:
+      // `any` is a builtin keyword; it can't be imported from core.
+      if qualified.clazz == class-manager.any-class: return null
+      return core-import
     // For now, all generated classes go into the same library.
     return null
 
