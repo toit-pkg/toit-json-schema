@@ -37,6 +37,7 @@ main:
   test-allof-multiple-refs-with-overlap
   test-oneof-undecidable-no-distinguishing-field
   test-oneof-required-subset-ambiguous
+  test-nullable-ref-and-array-null-safe
 
 test-simple-object:
   result := gen-code {
@@ -486,10 +487,11 @@ test-kebab-case-property:
   expect (code.contains "is-admin/bool")
       --message="Expected snake_case property normalized to kebab-case"
   // from-json reads using the original JSON key (not the Toit field name).
-  expect (code.contains "data[\"lastModified\"]")
-      --message="Expected from-json to read with original camel key"
-  expect (code.contains "data[\"is_admin\"]")
-      --message="Expected from-json to read with original snake key"
+  // Nullable fields use data.get so a missing key resolves to null.
+  expect (code.contains "data.get \"lastModified\"")
+      --message="Expected from-json to read with original camel key via data.get"
+  expect (code.contains "data.get \"is_admin\"")
+      --message="Expected from-json to read with original snake key via data.get"
   // to-json emits the original JSON key, preserving round-trip fidelity.
   expect (code.contains "\"user-name\"")
       --message="Expected to-json to emit original kebab key"
@@ -717,3 +719,45 @@ test-oneof-required-subset-ambiguous:
   expect (err is string) --message="Expected gen-code to throw"
   expect ((err as string).contains "subset of")
       --message="Expected error to mention required-set subset; was: $err"
+
+test-nullable-ref-and-array-null-safe:
+  // Tests that nullable $ref and array-of-$ref fields generate null-safe
+  // from-json/to-json: missing keys go through `data.get`, and the recursive
+  // conversion is skipped when the value is null.
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "\$defs": {
+      "Tag": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+        },
+      },
+    },
+    "type": "object",
+    "properties": {
+      "tag": { "\$ref": "#/\$defs/Tag" },
+      "tags": {
+        "type": "array",
+        "items": { "\$ref": "#/\$defs/Tag" },
+      },
+    },
+  }
+  code := result["test.toit"]
+  // Nullable lookup uses data.get rather than data[...] to tolerate a
+  // missing key.
+  expect (code.contains "data.get \"tag\"")
+      --message="Expected data.get for nullable \$ref field"
+  expect (code.contains "data.get \"tags\"")
+      --message="Expected data.get for nullable array field"
+  // The recursive call is guarded so a null value short-circuits to null.
+  expect (code.contains "== null) ? null : (Tag.from-json")
+      --message="Expected null guard before recursive Tag.from-json call"
+  expect (code.contains "== null) ? null : ((data.get \"tags\").map:")
+      --message="Expected null guard before .map: walk over nullable array"
+  // The to-json path is also null-safe.
+  expect (code.contains "(tag == null) ? null : tag.to-json")
+      --message="Expected to-json to skip .to-json on null \$ref field"
+  expect (code.contains "(tags == null) ? null : (tags.map:")
+      --message="Expected to-json to skip .map: walk on null array"
+
