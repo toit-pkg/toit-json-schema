@@ -16,15 +16,16 @@ import host.pipe
 import json-schema
 import json-schema.gen as schema-gen
 
-main:
+main args/List:
+  toit := args[0]
   tmp-dir := directory.mkdtemp "/tmp/gen-compile-test-"
   try:
-    test-each tmp-dir
+    test-each toit tmp-dir
   finally:
     // Best-effort cleanup; ignored on failure.
     catch: directory.rmdir --recursive tmp-dir
 
-test-each tmp-dir/string -> none:
+test-each toit/string tmp-dir/string -> none:
   cases := [
     ["simple-object", {
       "type": "object",
@@ -115,7 +116,7 @@ test-each tmp-dir/string -> none:
     files.do: | filename/string code/string |
       file.write-contents --path="$case-dir/$filename" code
     code := files["schema.toit"]
-    exit-code := pipe.run-program "toit" "analyze" "$case-dir/schema.toit"
+    exit-code := pipe.run-program toit "analyze" "$case-dir/schema.toit"
     if exit-code != 0:
       print "Failed case: $name"
       print "Generated code:"
