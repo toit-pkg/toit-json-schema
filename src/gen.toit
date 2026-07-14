@@ -14,7 +14,6 @@ import .store_
 import .uri
 
 class ClassManager:
-  used/Set ::= {}  // Of string.
   // The public toit-gen target for each schema URI. For schemas that are used
   // as allOf $ref parents this is an interface; otherwise it's a regular class.
   classes/Map ::= {:}  // From UriReference to toit-gen.Class.
@@ -34,45 +33,37 @@ class ClassManager:
     if class-seed:
       class-seed.do: | url/UriReference name/string |
         class-name := namer.toit-class-name name
-        use-unique_ --url=url class-name
+        clazz := toit-gen.Class class-name --kind=toit-gen.Class.CLASS
+        // Fix the name (instead of leaving it as a preferred name), so that
+        // seeded names win collisions with auto-derived names in toit-gen's
+        // naming phase.
+        clazz.name = class-name
+        classes[url] = clazz
 
-  use-unique_ --url/UriReference name/string -> toit-gen.Class:
-    attempt := name
-    i := 0
-    while used.contains attempt:
-      attempt = "$name$(i++)"
-    used.add attempt
-    clazz := toit-gen.Class attempt --kind=toit-gen.Class.CLASS
-    classes[url] = clazz
-    return clazz
+  /**
+  Returns the toit-gen class for the schema at $url, creating it if needed.
 
+  The $name is a preferred name; collisions are resolved by toit-gen's
+    naming phase.
+  */
   use-class url/UriReference name/string --as-interface/bool=false -> toit-gen.Class:
     if classes.contains url:
       return classes[url]
 
-    if as-interface:
-      attempt := name
-      i := 0
-      while used.contains attempt:
-        attempt = "$name$(i++)"
-      used.add attempt
-      itf := toit-gen.Class attempt --kind=toit-gen.Class.INTERFACE
-      classes[url] = itf
-      // Reserve the private impl class name. Toit treats names ending with
-      // "_" as private to the file. Hyphenate the suffix so toit-gen's
-      // PascalCase namer recognises "Impl" as a separate word ("AImpl_"
-      // instead of "Aimpl_").
-      impl-base := "$(attempt)-Impl"
-      impl-attempt := "$(impl-base)_"
-      j := 0
-      while used.contains impl-attempt:
-        impl-attempt = "$(impl-base)$(j++)_"
-      used.add impl-attempt
-      impl := toit-gen.Class impl-attempt --kind=toit-gen.Class.CLASS --is-private
-      impl-classes[url] = impl
-      return itf
+    if not as-interface:
+      clazz := toit-gen.Class name --kind=toit-gen.Class.CLASS
+      classes[url] = clazz
+      return clazz
 
-    return use-unique_ --url=url name
+    itf := toit-gen.Class name --kind=toit-gen.Class.INTERFACE
+    classes[url] = itf
+    // The private impl class. Toit treats names ending with "_" as private
+    // to the file; toit-gen appends the "_" for private classes. Hyphenate
+    // the suffix so toit-gen's PascalCase namer recognises "Impl" as a
+    // separate word ("AImpl_" instead of "Aimpl_").
+    impl := toit-gen.Class "$(name)-Impl" --kind=toit-gen.Class.CLASS --is-private
+    impl-classes[url] = impl
+    return itf
 
   operator [] url/UriReference -> toit-gen.Class?:
     return classes.get url
@@ -534,14 +525,7 @@ populate program/toit-gen.Program schemas/List
       --library-for-uri=library-for-uri
       --class-seed=class-seed
   generator.run schemas
-  // class-manager.classes also holds entries for schemas that NameVisitor
-  //   reserved a name for but Generator_ never materialised (primitives,
-  //   pure $ref schemas, type:array). Only return classes that ended up
-  //   in a library — otherwise lookup callers can hold a stub whose
-  //   `name` is never assigned.
-  generated := generator.class-manager.classes.filter: | url _ |
-    generator.library-of-class_.contains url
-  return Models generated
+  return generator.models
 
 /**
 Convenience wrapper around $populate for the single-library case.
@@ -596,6 +580,20 @@ class Generator_:
   schema-type schema/Schema -> SchemaType:
     return schema-types_.get schema.absolute-location --init=:
       SchemaType schema
+
+  /**
+  Returns a $Models facade over the classes this run generated.
+
+  The class-manager's classes also hold entries for schemas that NameVisitor
+    reserved a name for but that were never materialised (primitives, pure
+    \$ref schemas, type:array). Only classes that ended up in a library are
+    included — otherwise lookup callers could hold a stub whose `name` is
+    never assigned.
+  */
+  models -> Models:
+    generated := class-manager.classes.filter: | url _ |
+      library-of-class_.contains url
+    return Models generated
 
   gen-type type/SchemaType -> QualifiedType_:
     result := type.type class-manager
@@ -710,6 +708,32 @@ class Generator_:
     return library-gens_.get library --init=:
       LibraryGen library --run=this
 
+/**
+A schema property declared as a field on a generated class.
+
+Bundles the JSON property name, the property's schema type, and the
+  generated field definition.
+*/
+class PropertyField_:
+  name/string
+  type/SchemaType
+  field/toit-gen.VarDefinition
+
+  constructor .name .type .field:
+
+/**
+A oneOf variant prepared for heuristic (discriminator-less) dispatch.
+*/
+class OneOfVariant_:
+  url/UriReference
+  clazz/toit-gen.Class
+  // The property names the variant requires.
+  required/Set
+  // All property names the variant declares (required and optional).
+  declared/Set
+
+  constructor .url .clazz --.required --.declared:
+
 class LibraryGen:
   library/toit-gen.Library
   run_/Generator_
@@ -733,13 +757,12 @@ class LibraryGen:
     chain or contributed by an earlier source on this class). Adds newly-declared
     names to $declared.
 
-  Returns triples [prop-name/string, prop-type/SchemaType, field/VarDefinition]
-    for each newly-declared field, in property iteration order. Skipped
-    properties simply do not appear in the result.
+  Returns a $PropertyField_ for each newly-declared field, in property
+    iteration order. Skipped properties simply do not appear in the result.
   */
   gen-fields_ source-type/SchemaType --target/toit-gen.Class --declared/Set -> List:
-    triples := []
-    if not source-type.properties or not source-type.properties.properties: return triples
+    result := []
+    if not source-type.properties or not source-type.properties.properties: return result
     source-type.properties.properties.do: | prop-name/string schema/Schema |
       if declared.contains prop-name: continue.do
       prop-type := run_.schema-type schema
@@ -764,29 +787,26 @@ class LibraryGen:
       if prop-type.description-annotation:
         field.toitdoc = [prop-type.description-annotation.value]
       target.fields.add field
-      triples.add [prop-name, prop-type, field]
+      result.add (PropertyField_ prop-name prop-type field)
       declared.add prop-name
-    return triples
+    return result
 
   /**
-  Generates constructor body statements that initialize $triples from
-    a `data/Map` parameter.
+  Generates constructor body statements that initialize the fields of
+    $property-fields from a `data/Map` parameter.
 
   For required fields uses `data[key]` (throws on missing). For nullable
     fields uses `data.get key` so a missing key resolves to null rather
     than throwing.
   */
-  gen-constructor-body_ triples/List --data-arg/toit-gen.VarDefinition --body/toit-gen.Sequence -> none:
-    triples.do: | triple/List |
-      prop-name/string := triple[0]
-      prop-type/SchemaType := triple[1]
-      field/toit-gen.VarDefinition := triple[2]
-      lookup/toit-gen.Expression := field.is-nullable
-          ? toit-gen.Call (toit-gen.Ref data-arg) "get" --arguments=[toit-gen.Literal prop-name]
-          : toit-gen.Index (toit-gen.Ref data-arg) (toit-gen.Literal prop-name)
-      converted := prop-type.convert-from-json lookup
+  gen-constructor-body_ property-fields/List --data-arg/toit-gen.VarDefinition --body/toit-gen.Sequence -> none:
+    property-fields.do: | prop/PropertyField_ |
+      lookup/toit-gen.Expression := prop.field.is-nullable
+          ? toit-gen.Call (toit-gen.Ref data-arg) "get" --arguments=[toit-gen.Literal prop.name]
+          : toit-gen.Index (toit-gen.Ref data-arg) (toit-gen.Literal prop.name)
+      converted := prop.type.convert-from-json lookup
           --class-manager=class-manager
-          --nullable=field.is-nullable
+          --nullable=prop.field.is-nullable
           --gen-ref=: | t/SchemaType |
             qualified := run_.gen-type t
             imp := gen-import_ qualified
@@ -794,19 +814,16 @@ class LibraryGen:
               toit-gen.ImportedRef imp qualified.clazz
             else:
               toit-gen.Ref qualified.clazz
-      body.assign field converted
+      body.assign prop.field converted
 
   /**
-  Appends to-json map entries for $triples (one entry per triple).
+  Appends to-json map entries for $property-fields (one entry per property).
   */
-  gen-to-json-entries_ triples/List --keys/List --values/List -> none:
-    triples.do: | triple/List |
-      prop-name/string := triple[0]
-      prop-type/SchemaType := triple[1]
-      field/toit-gen.VarDefinition := triple[2]
-      field-ref := toit-gen.Ref field
-      converted := prop-type.convert-to-json field-ref --nullable=field.is-nullable
-      keys.add (toit-gen.Literal prop-name)
+  gen-to-json-entries_ property-fields/List --keys/List --values/List -> none:
+    property-fields.do: | prop/PropertyField_ |
+      field-ref := toit-gen.Ref prop.field
+      converted := prop.type.convert-to-json field-ref --nullable=prop.field.is-nullable
+      keys.add (toit-gen.Literal prop.name)
       values.add converted
 
   gen-class type/SchemaType -> none:
@@ -871,8 +888,12 @@ class LibraryGen:
     // parents (recursive) → inline allOf subschemas (recursive). Dedup by
     // property name (first wins).
     declared/Set := {}
-    triples := []
-    collect-fields-recursive_ type --target=impl-clazz --declared=declared --triples=triples
+    property-fields := []
+    collect-fields-recursive_ type
+        --target=impl-clazz
+        --declared=declared
+        --property-fields=property-fields
+        --seen={}
 
     // Generate from-json constructor on the impl class.
     data-arg := toit-gen.VarDefinition.parameter "data"
@@ -882,7 +903,7 @@ class LibraryGen:
       // OneOf variant: call super.from-sub_ (the abstract base's private constructor).
       constructor-body.add
           toit-gen.Statement (toit-gen.Call toit-gen.Super "from-sub_")
-    gen-constructor-body_ triples --data-arg=data-arg --body=constructor-body
+    gen-constructor-body_ property-fields --data-arg=data-arg --body=constructor-body
     constr := toit-gen.Function.constr --name="from-json" --parameters=[data-arg] constructor-body
     impl-clazz.members.add constr
 
@@ -890,7 +911,7 @@ class LibraryGen:
     to-json-body := toit-gen.Sequence
     map-keys := []
     map-values := []
-    gen-to-json-entries_ triples --keys=map-keys --values=map-values
+    gen-to-json-entries_ property-fields --keys=map-keys --values=map-values
     map-literal := toit-gen.MapLiteral map-keys map-values
     to-json-body.ret map-literal
     to-json-map-ref := toit-gen.ImportedRef core-import class-manager.map-class
@@ -906,9 +927,11 @@ class LibraryGen:
       // and own/inline must be declared.
       inherited-via-extends/Set := {}
       if first-parent-type:
-        collect-property-names-recursive_ first-parent-type --result=inherited-via-extends
+        collect-property-names-recursive_ first-parent-type
+            --result=inherited-via-extends
+            --seen={}
       gen-interface-members_ public-clazz
-          --triples=triples
+          --property-fields=property-fields
           --impl=impl-clazz
           --skip=inherited-via-extends
       library.classes.add public-clazz
@@ -917,34 +940,53 @@ class LibraryGen:
   /**
   Walks $type's allOf chain transitively, generating fields on $target for
     every property encountered (deduped by name). $declared is updated with
-    the names of newly-declared fields, and $triples receives the
-    `[prop-name, SchemaType, field]` entries in declaration order.
+    the names of newly-declared fields, and $property-fields receives the
+    generated $PropertyField_ entries in declaration order.
 
   Order: $type's own properties first, then each allOf \$ref parent (recursing
     into the parent's own allOf chain), then each inline allOf subschema
     (also recursing).
+
+  The $seen set guards against cyclic \$ref chains: schemas whose URL is
+    already in $seen are skipped.
   */
   collect-fields-recursive_ type/SchemaType
       --target/toit-gen.Class
       --declared/Set
-      --triples/List
+      --property-fields/List
+      --seen/Set
       -> none:
-    triples.add-all (gen-fields_ type --target=target --declared=declared)
+    if seen.contains type.url: return
+    seen.add type.url
+    property-fields.add-all (gen-fields_ type --target=target --declared=declared)
     if not type.all-of: return
     type.all-of.subschemas.do: | sub/Schema |
       sub-type := run_.schema-type sub
       if sub-type.ref:
         ref-target-type := run_.schema-type sub-type.ref.target
-        collect-fields-recursive_ ref-target-type --target=target --declared=declared --triples=triples
+        collect-fields-recursive_ ref-target-type
+            --target=target
+            --declared=declared
+            --property-fields=property-fields
+            --seen=seen
       else if sub-type.properties and sub-type.properties.properties:
-        collect-fields-recursive_ sub-type --target=target --declared=declared --triples=triples
+        collect-fields-recursive_ sub-type
+            --target=target
+            --declared=declared
+            --property-fields=property-fields
+            --seen=seen
 
   /**
   Walks $type's allOf chain transitively and adds every property name it
     encounters to $result. Used to compute the set of members an interface
     inherits via `extends` (so the interface body can skip redeclaring them).
+
+  The $seen set guards against cyclic \$ref chains: schemas whose URL is
+    already in $seen are skipped.
   */
-  collect-property-names-recursive_ type/SchemaType --result/Set -> none:
+  collect-property-names-recursive_ type/SchemaType --result/Set --seen/Set -> none:
+    if seen.contains type.url: return
+    seen.add type.url
     if type.properties and type.properties.properties:
       type.properties.properties.do: | name/string _ |
         result.add name
@@ -952,13 +994,15 @@ class LibraryGen:
     type.all-of.subschemas.do: | sub/Schema |
       sub-type := run_.schema-type sub
       if sub-type.ref:
-        collect-property-names-recursive_ (run_.schema-type sub-type.ref.target) --result=result
+        collect-property-names-recursive_ (run_.schema-type sub-type.ref.target)
+            --result=result
+            --seen=seen
       else if sub-type.properties:
-        collect-property-names-recursive_ sub-type --result=result
+        collect-property-names-recursive_ sub-type --result=result --seen=seen
 
   /**
   Populates an interface declaration with abstract getter signatures (one per
-    property in $triples whose name is not in $skip) and a factory
+    property in $property-fields whose name is not in $skip) and a factory
     `constructor.from-json` that returns a fresh $impl instance.
 
   $skip holds names inherited via the interface's `extends` parent — those
@@ -968,15 +1012,14 @@ class LibraryGen:
     plus factory constructors with bodies; the patched toit-gen renders these
     correctly when the enclosing class has `kind == INTERFACE`.
   */
-  gen-interface-members_ itf/toit-gen.Class --triples/List --impl/toit-gen.Class --skip/Set -> none:
-    triples.do: | triple/List |
-      prop-name/string := triple[0]
-      if skip.contains prop-name: continue.do
-      field/toit-gen.VarDefinition := triple[2]
-      // Reuse the impl field's type ref for the getter return type.
-      getter := toit-gen.Function prop-name
+  gen-interface-members_ itf/toit-gen.Class --property-fields/List --impl/toit-gen.Class --skip/Set -> none:
+    property-fields.do: | prop/PropertyField_ |
+      if skip.contains prop.name: continue.do
+      // Reuse the impl field's type ref for the getter return type. Sharing
+      // a Ref node between tree positions is sanctioned by toit-gen.
+      getter := toit-gen.Function prop.name
           --parameters=[]
-          --return-type=field.type
+          --return-type=prop.field.type
           --is-abstract
           null
       itf.members.add getter
@@ -1040,26 +1083,33 @@ class LibraryGen:
           toit-gen.Throw
               toit-gen.StringInterpolation ["Unknown $disc-prop: ", toit-gen.Ref disc-var, ""]
     else:
-      // Heuristic dispatch: check for required/unique fields.
-      // Discriminator-less oneOf is supported only when each variant is
-      // statically distinguishable. We fail at codegen otherwise rather than
-      // emit dispatch that's wrong on edge cases at runtime.
-      check-heuristic-decidable_ type mapping
-      mapping.do: | _/string variant-url/UriReference |
-        variant-class := class-manager[variant-url]
-        if not variant-class: continue.do
-        variant-type := find-variant-type_ variant-url
-        if not variant-type: continue.do
-        distinguishing-field := find-distinguishing-field_ variant-type mapping
-        // check-heuristic-decidable_ has already verified this is non-null.
-        condition := toit-gen.Call (toit-gen.Ref data-arg) "contains"
-            --arguments=[toit-gen.Literal distinguishing-field]
-        then-body := toit-gen.Sequence
-        then-body.ret
-            toit-gen.Call (toit-gen.Ref variant-class) "from-json" --arguments=[toit-gen.Ref data-arg]
-        factory-body.iff condition then-body
-      factory-body.add
-          toit-gen.Throw (toit-gen.Literal "No matching variant")
+      // Heuristic dispatch without a discriminator: a variant matches when
+      // the input contains all of the variant's required properties. The
+      // variants are tested in the order computed by
+      // $order-variants-for-dispatch_, which guarantees that a check can
+      // only fire for inputs of its own variant. We fail at codegen when no
+      // such order exists rather than emit dispatch that's wrong on edge
+      // cases at runtime.
+      ordered := order-variants-for-dispatch_ type mapping
+      ordered.do: | variant/OneOfVariant_ |
+        from-json-call := toit-gen.Call (toit-gen.Ref variant.clazz) "from-json"
+            --arguments=[toit-gen.Ref data-arg]
+        condition/toit-gen.Expression? := null
+        variant.required.do: | prop-name/string |
+          check := toit-gen.Call (toit-gen.Ref data-arg) "contains"
+              --arguments=[toit-gen.Literal prop-name]
+          condition = condition ? (toit-gen.Binary condition "and" check) : check
+        if condition:
+          then-body := toit-gen.Sequence
+          then-body.ret from-json-call
+          factory-body.iff condition then-body
+        else:
+          // A variant without required properties is always ordered last and
+          // acts as the catch-all.
+          factory-body.ret from-json-call
+      if ordered.is-empty or not ordered.last.required.is-empty:
+        factory-body.add
+            toit-gen.Throw (toit-gen.Literal "No matching variant")
     factory := toit-gen.Function.constr --name="from-json" --parameters=[data-arg] factory-body
     clazz.members.add factory
 
@@ -1074,39 +1124,56 @@ class LibraryGen:
     return run_.schema-type schema
 
   /**
-  Validates that a discriminator-less oneOf is statically decidable.
+  Orders the variants of a discriminator-less oneOf for heuristic dispatch.
 
-  Throws at codegen if:
-  - Any variant lacks a distinguishing field (so dispatch would silently drop
-    the variant at runtime).
-  - One variant's required-property set is a strict subset of another's
-    (so an input matching the larger variant would also satisfy the smaller
-    variant's `contains` heuristic, making dispatch order-dependent).
+  Dispatch tests the variants in the returned order; a variant matches when
+    the input contains all of the variant's required properties.
 
-  Both conditions are user-fixable: add a discriminator on $base-type.
+  Variants are peeled off in rounds: a variant is peeled when no other
+    remaining variant declares a superset of its required properties — an
+    input belonging to a variant that is checked later can then never
+    contain all of the peeled variant's required properties. Since peeling
+    repeats on the remaining variants, a variant only needs to be
+    distinguishable from the variants checked after it. In particular a
+    variant whose required set is a strict subset of another's is simply
+    checked after the other one.
+
+  Throws at codegen when a round cannot peel any variant: the remaining
+    variants are not statically distinguishable (e.g. two variants with the
+    same required properties). This is user-fixable: add a discriminator on
+    $base-type.
+
+  Returns a list of $OneOfVariant_ in dispatch order.
   */
-  check-heuristic-decidable_ base-type/SchemaType mapping/Map -> none:
-    variant-types/List := []
+  order-variants-for-dispatch_ base-type/SchemaType mapping/Map -> List:
+    variants := []
     mapping.do: | _/string variant-url/UriReference |
+      clazz := class-manager[variant-url]
       variant-type := find-variant-type_ variant-url
-      if variant-type: variant-types.add variant-type
+      if not clazz or not variant-type: continue.do
+      required := required-set_ variant-type
+      declared := {}
+      declared.add-all required
+      if variant-type.properties and variant-type.properties.properties:
+        variant-type.properties.properties.do: | name/string _ |
+          declared.add name
+      variants.add (OneOfVariant_ variant-url clazz --required=required --declared=declared)
 
-    // Strict-subset detection across required sets.
-    variant-types.do: | a/SchemaType |
-      a-required := required-set_ a
-      if a-required.is-empty: continue.do
-      variant-types.do: | b/SchemaType |
-        if identical a b: continue.do
-        b-required := required-set_ b
-        if b-required.size <= a-required.size: continue.do
-        if is-subset_ a-required b-required:
-          throw "Discriminator-less oneOf at $(base-type.url) is ambiguous: variant $(a.url)'s required set is a subset of $(b.url)'s. Add a discriminator."
-
-    // Each variant must have a distinguishing field.
-    variant-types.do: | v/SchemaType |
-      distinguishing := find-distinguishing-field_ v mapping
-      if not distinguishing:
-        throw "Discriminator-less oneOf at $(base-type.url) cannot statically distinguish variant $(v.url). Add a discriminator."
+    ordered := []
+    remaining := variants
+    while not remaining.is-empty:
+      peeled := remaining.filter: | variant/OneOfVariant_ |
+        remaining.every: | other/OneOfVariant_ |
+          // Note that 'identical' skips the variant itself, but not other
+          // variants that happen to have equal sets.
+          (identical variant other) or not (is-subset_ variant.required other.declared)
+      if peeled.is-empty:
+        urls := remaining.map: | variant/OneOfVariant_ | variant.url.to-string
+        throw "Discriminator-less oneOf at $(base-type.url) cannot statically distinguish variants $(urls.join ", "). Add a discriminator."
+      ordered.add-all peeled
+      remaining = remaining.filter: | variant/OneOfVariant_ |
+        not (peeled.any: identical it variant)
+    return ordered
 
   static required-set_ type/SchemaType -> Set:
     if not type.required: return {}
@@ -1117,33 +1184,6 @@ class LibraryGen:
   static is-subset_ a/Set b/Set -> bool:
     a.do: if not b.contains it: return false
     return true
-
-  /**
-  Finds a field name that distinguishes this variant from others.
-
-  Returns the name of a required field that is unique to this variant,
-    or the first property name if no required fields exist.
-  */
-  find-distinguishing-field_ variant-type/SchemaType mapping/Map -> string?:
-    if not variant-type.properties or not variant-type.properties.properties:
-      return null
-    // Collect all property names from other variants.
-    other-props := {}
-    mapping.do: | _/string other-url/UriReference |
-      if other-url != variant-type.url:
-        other-type := find-variant-type_ other-url
-        if other-type and other-type.properties and other-type.properties.properties:
-          other-type.properties.properties.do: | name/string _ |
-            other-props.add name
-    // Find a required field unique to this variant.
-    if variant-type.required:
-      variant-type.required.properties.do: | name/string |
-        if not other-props.contains name: return name
-    // Fall back to any unique property.
-    variant-type.properties.properties.do: | name/string _ |
-      if not other-props.contains name: return name
-    // No distinguishing field found.
-    return null
 
   gen-import_ qualified/QualifiedType_ -> toit-gen.Import?:
     uri := qualified.uri

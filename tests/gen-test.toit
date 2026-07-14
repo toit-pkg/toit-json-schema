@@ -36,8 +36,9 @@ main:
   test-populate-class-seed
   test-allof-multiple-refs-with-overlap
   test-oneof-undecidable-no-distinguishing-field
-  test-oneof-required-subset-ambiguous
+  test-oneof-required-subset-ordered
   test-nullable-ref-and-array-null-safe
+  test-oneof-catch-all-variant
 
 test-simple-object:
   result := gen-code {
@@ -686,9 +687,10 @@ test-oneof-undecidable-no-distinguishing-field:
   expect ((err as string).contains "cannot statically distinguish")
       --message="Expected error to mention undistinguishable variant; was: $err"
 
-test-oneof-required-subset-ambiguous:
-  // Variant A's required ⊂ variant B's required: any input satisfying B
-  // would also satisfy A's `contains` heuristic, so dispatch is ambiguous.
+test-oneof-required-subset-ordered:
+  // Variant A's required ⊂ variant B's required: dispatch checks B (the
+  // superset) first — an input containing all of B's required properties can
+  // only belong to B, so A's weaker check is safe afterwards.
   schema-json := {
     "\$schema": "https://json-schema.org/draft/2020-12/schema",
     "\$defs": {
@@ -715,10 +717,17 @@ test-oneof-required-subset-ambiguous:
       { "\$ref": "#/\$defs/B" },
     ],
   }
-  err := catch: gen-code schema-json
-  expect (err is string) --message="Expected gen-code to throw"
-  expect ((err as string).contains "subset of")
-      --message="Expected error to mention required-set subset; was: $err"
+  result := gen-code schema-json
+  code := result["test.toit"]
+  // B's check must test all of its required properties.
+  expect (code.contains "(data.contains \"shared\") and (data.contains \"more\")")
+      --message="Expected conjunction over B's required properties"
+  b-dispatch := code.index-of "return B.from-json"
+  a-dispatch := code.index-of "return A.from-json"
+  expect b-dispatch >= 0 --message="Expected dispatch to B"
+  expect a-dispatch >= 0 --message="Expected dispatch to A"
+  expect b-dispatch < a-dispatch
+      --message="Expected B (required superset) to be checked before A"
 
 test-nullable-ref-and-array-null-safe:
   // Tests that nullable $ref and array-of-$ref fields generate null-safe
@@ -761,3 +770,34 @@ test-nullable-ref-and-array-null-safe:
   expect (code.contains "(tags == null) ? null : (tags.map:")
       --message="Expected to-json to skip .map: walk on null array"
 
+test-oneof-catch-all-variant:
+  // A variant without required properties can't be distinguished by a
+  // `contains` check. It is checked last, as an unconditional catch-all.
+  schema-json := {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "\$defs": {
+      "Tagged": {
+        "type": "object",
+        "properties": { "tag": { "type": "string" } },
+        "required": ["tag"],
+      },
+      "Free": {
+        "type": "object",
+        "properties": { "note": { "type": "string" } },
+      },
+    },
+    "oneOf": [
+      { "\$ref": "#/\$defs/Free" },
+      { "\$ref": "#/\$defs/Tagged" },
+    ],
+  }
+  result := gen-code schema-json
+  code := result["test.toit"]
+  tagged-dispatch := code.index-of "return Tagged.from-json"
+  free-dispatch := code.index-of "return Free.from-json"
+  expect tagged-dispatch >= 0 --message="Expected dispatch to Tagged"
+  expect free-dispatch >= 0 --message="Expected dispatch to Free"
+  expect tagged-dispatch < free-dispatch
+      --message="Expected the catch-all variant Free to be checked last"
+  expect (not code.contains "No matching variant")
+      --message="Expected no unreachable throw after the catch-all"
