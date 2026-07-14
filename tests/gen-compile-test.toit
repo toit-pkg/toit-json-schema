@@ -104,6 +104,22 @@ test-each toit/string tmp-dir/string -> none:
         "amount": { "type": ["integer", "number"] },
       },
     }],
+    ["nullable-ref-and-array", {
+      "\$defs": {
+        "Tag": {
+          "type": "object",
+          "properties": { "name": { "type": "string" } },
+        },
+      },
+      "type": "object",
+      "properties": {
+        "tag": { "\$ref": "#/\$defs/Tag" },
+        "tags": {
+          "type": "array",
+          "items": { "\$ref": "#/\$defs/Tag" },
+        },
+      },
+    }],
   ]
 
   cases.do: | pair/List |

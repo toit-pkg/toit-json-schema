@@ -362,7 +362,7 @@ class SchemaType:
     if not type-string: return false
     return type-string == "object"
 
-  convert-from-json expr/toit-gen.Expression -> toit-gen.Expression
+  convert-from-json expr/toit-gen.Expression --nullable/bool=false -> toit-gen.Expression
       --class-manager/ClassManager
       [--gen-ref]
   :
@@ -376,7 +376,7 @@ class SchemaType:
             --gen-ref=gen-ref
         block := toit-gen.Block --parameters=[it-def]
             toit-gen.Statement element-conversion
-        return toit-gen.Call expr "map" --arguments=[block]
+        return wrap-null-safe_ expr (toit-gen.Call expr "map" --arguments=[block]) --nullable=nullable
     if not is-object: return expr
     if is-typed-map:
       value-type := SchemaType properties.additional
@@ -387,21 +387,24 @@ class SchemaType:
           --gen-ref=gen-ref
       block := toit-gen.Block --parameters=[toit-gen.VarDefinition.ignored, value-def]
           toit-gen.Statement element-conversion
-      map-call := toit-gen.Call expr "map" --arguments=[block]
-      return map-call
+      return wrap-null-safe_ expr (toit-gen.Call expr "map" --arguments=[block]) --nullable=nullable
     if is-map:
-      return toit-gen.As expr class-manager.map-class
+      return wrap-null-safe_ expr (toit-gen.As expr class-manager.map-class) --nullable=nullable
     self-ref/toit-gen.Ref := gen-ref.call this
-    return toit-gen.Call self-ref "from-json"
-        --arguments=[expr]
+    call := toit-gen.Call self-ref "from-json" --arguments=[expr]
+    return wrap-null-safe_ expr call --nullable=nullable
 
   /**
   Converts an expression to its JSON representation.
 
   Returns the expression unchanged for primitives, or wraps it in a
     `.to-json` call for objects and typed arrays.
+
+  When $nullable is true, the result is guarded by a null check so the
+    conversion is skipped (and the whole expression evaluates to null) when
+    $expr is null.
   */
-  convert-to-json expr/toit-gen.Expression -> toit-gen.Expression:
+  convert-to-json expr/toit-gen.Expression --nullable/bool=false -> toit-gen.Expression:
     if effective-type == "array" and items and items.items:
       element-type := SchemaType items.items
       if not element-type.is-primitive:
@@ -410,9 +413,9 @@ class SchemaType:
         element-conversion := element-type.convert-to-json it-ref
         block := toit-gen.Block --parameters=[it-def]
             toit-gen.Statement element-conversion
-        return toit-gen.Call expr "map" --arguments=[block]
+        return wrap-null-safe_ expr (toit-gen.Call expr "map" --arguments=[block]) --nullable=nullable
     if ref:
-      return (SchemaType ref.target).convert-to-json expr
+      return (SchemaType ref.target).convert-to-json expr --nullable=nullable
     if not is-object: return expr
     if is-typed-map:
       value-type := SchemaType properties.additional
@@ -421,9 +424,23 @@ class SchemaType:
       element-conversion := value-type.convert-to-json value-ref
       block := toit-gen.Block --parameters=[toit-gen.VarDefinition.ignored, value-def]
           toit-gen.Statement element-conversion
-      return toit-gen.Call expr "map" --arguments=[block]
+      return wrap-null-safe_ expr (toit-gen.Call expr "map" --arguments=[block]) --nullable=nullable
     if is-map: return expr
-    return toit-gen.Call expr "to-json"
+    return wrap-null-safe_ expr (toit-gen.Call expr "to-json") --nullable=nullable
+
+/**
+Wraps $converted in a null check on $expr when $nullable.
+
+For nullable fields the JSON value (or the field itself) may be null, in
+  which case we must skip the recursive `from-json` / `to-json` walk.
+*/
+wrap-null-safe_ expr/toit-gen.Expression converted/toit-gen.Expression --nullable/bool -> toit-gen.Expression:
+  if not nullable: return converted
+  null-lit := toit-gen.Literal null
+  return toit-gen.Ternary
+      (toit-gen.Binary expr "==" null-lit)
+      null-lit
+      converted
 
 /**
 Populates a $SchemaType's fields by visiting the source schema's actions.
@@ -777,12 +794,19 @@ class LibraryGen:
   /**
   Generates constructor body statements that initialize the fields of
     $property-fields from a `data/Map` parameter.
+
+  For required fields uses `data[key]` (throws on missing). For nullable
+    fields uses `data.get key` so a missing key resolves to null rather
+    than throwing.
   */
   gen-constructor-body_ property-fields/List --data-arg/toit-gen.VarDefinition --body/toit-gen.Sequence -> none:
     property-fields.do: | prop/PropertyField_ |
-      index := toit-gen.Index (toit-gen.Ref data-arg) (toit-gen.Literal prop.name)
-      converted := prop.type.convert-from-json index
+      lookup/toit-gen.Expression := prop.field.is-nullable
+          ? toit-gen.Call (toit-gen.Ref data-arg) "get" --arguments=[toit-gen.Literal prop.name]
+          : toit-gen.Index (toit-gen.Ref data-arg) (toit-gen.Literal prop.name)
+      converted := prop.type.convert-from-json lookup
           --class-manager=class-manager
+          --nullable=prop.field.is-nullable
           --gen-ref=: | t/SchemaType |
             qualified := run_.gen-type t
             imp := gen-import_ qualified
@@ -798,7 +822,7 @@ class LibraryGen:
   gen-to-json-entries_ property-fields/List --keys/List --values/List -> none:
     property-fields.do: | prop/PropertyField_ |
       field-ref := toit-gen.Ref prop.field
-      converted := prop.type.convert-to-json field-ref
+      converted := prop.type.convert-to-json field-ref --nullable=prop.field.is-nullable
       keys.add (toit-gen.Literal prop.name)
       values.add converted
 
