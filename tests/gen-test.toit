@@ -5,13 +5,13 @@
 import expect show *
 import json-schema
 import json-schema.gen as schema-gen
+import toit-gen
 
 /// Builds a schema from a JSON map and generates code in memory.
 /// Returns a Map from module filename to generated code string.
 gen-code schema-json/Map --module/string="test.toit" -> Map:
   schema := json-schema.build schema-json
-  generator := schema-gen.Gen --module=module
-  return generator.gen [schema]
+  return schema-gen.gen [schema] --module=module
 
 main:
   test-simple-object
@@ -31,6 +31,13 @@ main:
   test-incompatible-type-union
   test-kebab-case-property
   test-deeply-nested
+  test-populate-multi-library
+  test-models-lookup
+  test-populate-class-seed
+  test-allof-multiple-refs-with-overlap
+  test-oneof-undecidable-no-distinguishing-field
+  test-oneof-required-subset-ordered
+  test-oneof-catch-all-variant
 
 test-simple-object:
   result := gen-code {
@@ -198,7 +205,8 @@ test-to-json:
       --message="Expected nested object to call .to-json"
 
 test-mixin-for-allof:
-  // Tests that schemas used in allOf get a mixin generated.
+  // Tests allOf with $ref: parent becomes an interface, child class
+  // implements it. The inline subschema contributes its own fields.
   result := gen-code {
     "\$schema": "https://json-schema.org/draft/2020-12/schema",
     "\$defs": {
@@ -223,21 +231,25 @@ test-mixin-for-allof:
     "\$ref": "#/\$defs/Dog",
   }
   code := result["test.toit"]
-  // Pet is used in an allOf, so it should get a mixin.
-  expect (code.contains "mixin PetMixin")
-      --message="Expected mixin for Pet (used in allOf)"
-  // Pet class should extend Object with PetMixin.
-  expect (code.contains "class Pet extends Object with PetMixin")
-      --message="Expected Pet to extend Object with PetMixin"
-  // Dog should extend Pet (allOf with $ref).
-  expect (code.contains "class Dog extends Pet")
-      --message="Expected Dog to extend Pet"
-  // Dog's constructor should call super.from-json.
-  expect (code.contains "super.from-json")
-      --message="Expected Dog constructor to call super.from-json"
-  // Dog should have its own bark field.
+  // No mixins are generated.
+  expect (not code.contains "mixin ")
+      --message="Did not expect any mixin in generated code"
+  // Pet is referenced as an allOf parent → public face is an interface,
+  // private impl class holds the actual fields/methods.
+  expect (code.contains "interface Pet")
+      --message="Expected interface Pet (used as allOf parent)"
+  expect (code.contains "class PetImpl_ implements Pet")
+      --message="Expected private impl class PetImpl_ implementing Pet"
+  // Pet's interface exposes a factory that delegates to the impl.
+  expect (code.contains "return PetImpl_.from-json")
+      --message="Expected Pet.from-json factory delegating to PetImpl_"
+  // Dog is a leaf class — implements Pet directly with all fields.
+  expect (code.contains "class Dog implements Pet")
+      --message="Expected Dog to implement Pet via allOf"
+  expect (code.contains "name/string")
+      --message="Expected Dog to declare name (transitive from Pet)"
   expect (code.contains "bark/string")
-      --message="Expected Dog to have bark field"
+      --message="Expected Dog to have bark field (from inline allOf)"
 
 test-oneof-discriminator:
   // Tests oneOf with discriminator → abstract base + factory + subclasses.
@@ -396,12 +408,17 @@ test-oneof-with-allof-variants:
       --message="Expected abstract oneOf base class"
   expect (code.contains "constructor.from-json data")
       --message="Expected factory on base class"
-  // Dog and Cat extend Pet (allOf takes precedence for superclass).
-  expect (code.contains "class Dog extends Pet")
-      --message="Expected Dog to extend Pet via allOf"
-  // Pet should have a mixin (used in allOf).
-  expect (code.contains "mixin PetMixin")
-      --message="Expected PetMixin for Pet"
+  // Dog and Cat extend Root (oneOf variant) and implements Pet (allOf parent).
+  expect (code.contains "class Dog extends Root implements Pet")
+      --message="Expected Dog to extend Root and implement Pet"
+  // No mixins generated.
+  expect (not code.contains "mixin ")
+      --message="Did not expect any mixin in generated code"
+  // Pet is referenced as an allOf parent → interface + private impl.
+  expect (code.contains "interface Pet")
+      --message="Expected Pet as interface (used as allOf parent)"
+  expect (code.contains "class PetImpl_")
+      --message="Expected private PetImpl_ class"
   // Dog should have its own fields.
   expect (code.contains "bark/string")
       --message="Expected Dog to have bark field"
@@ -514,3 +531,230 @@ test-deeply-nested:
       --message="Expected Root.from-json to delegate to RootConfig"
   expect (code.contains "RootConfigDatabase.from-json")
       --message="Expected RootConfig.from-json to delegate to RootConfigDatabase"
+
+test-populate-multi-library:
+  // Routes generated classes into a dedicated `models.toit` library that
+  // sits next to a hand-built `api.toit`. Verifies populate adds the model
+  // class to the right library and that program.gen renders both files.
+  schema := json-schema.build {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": { "name": { "type": "string" } },
+  }
+  program := toit-gen.Program
+  api-lib := toit-gen.Library "api.toit"
+  models-lib := toit-gen.Library "models.toit"
+  program.libraries.add api-lib
+  program.libraries.add models-lib
+  schema-gen.populate program [schema] --library-for-uri=:: models-lib
+  files := program.gen --in-memory
+  expect (files.contains "models.toit")
+      --message="Expected models.toit in output"
+  expect (files.contains "api.toit")
+      --message="Expected api.toit in output"
+  expect ((files["models.toit"]).contains "class Root")
+      --message="Expected Root class to land in models.toit"
+  expect (not (files["api.toit"]).contains "class Root")
+      --message="Root must not appear in api.toit"
+
+test-models-lookup:
+  // Verifies Models.lookup-by-uri and Models.lookup return the toit-gen.Class
+  // for a generated schema. Primitive schemas should return null.
+  json-schema-doc := json-schema.build {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": { "name": { "type": "string" } },
+  }
+  program := toit-gen.Program
+  lib := toit-gen.Library "schema.toit"
+  program.libraries.add lib
+  models := schema-gen.populate program [json-schema-doc] --library-for-uri=:: lib
+
+  // Lookup by Schema.
+  clazz := models.lookup json-schema-doc.schema
+  expect (clazz != null) --message="Expected lookup to return a Class for the root object schema"
+  expect-equals "Root" clazz.preferred-name
+
+  // Lookup by URI.
+  clazz-by-uri := models.lookup-by-uri json-schema-doc.schema.absolute-location
+  expect (clazz-by-uri == clazz)
+      --message="lookup and lookup-by-uri should return the same Class"
+
+test-populate-class-seed:
+  // Verifies that --class-seed lets a caller pre-name a schema by URI,
+  // overriding the auto-derived name. This is what openapi-gen needs for
+  // inline schemas where the JSON-pointer-derived name ("schema") is
+  // useless.
+  json-schema-doc := json-schema.build {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": { "name": { "type": "string" } },
+  }
+  program := toit-gen.Program
+  lib := toit-gen.Library "schema.toit"
+  program.libraries.add lib
+  uri := json-schema-doc.schema.absolute-location
+  models := schema-gen.populate program [json-schema-doc]
+      --library-for-uri=:: lib
+      --class-seed={uri: "Pet"}
+  clazz := models.lookup-by-uri uri
+  expect (clazz != null) --message="Expected lookup to return a Class for the seeded schema"
+  expect-equals "Pet" clazz.preferred-name
+
+test-allof-multiple-refs-with-overlap:
+  // allOf with two $ref parents. Both parents become interfaces; C is a
+  // leaf class that implements both. C declares all transitive fields
+  // directly (deduped by name — `shared` appears once on C).
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "\$defs": {
+      "A": {
+        "type": "object",
+        "properties": {
+          "shared": { "type": "string" },
+          "a-only": { "type": "integer" },
+        },
+      },
+      "B": {
+        "type": "object",
+        "properties": {
+          "shared": { "type": "string" },
+          "b-only": { "type": "boolean" },
+        },
+      },
+      "C": {
+        "allOf": [
+          { "\$ref": "#/\$defs/A" },
+          { "\$ref": "#/\$defs/B" },
+        ],
+      },
+    },
+    "\$ref": "#/\$defs/C",
+  }
+  code := result["test.toit"]
+  // A and B are allOf parents → interfaces.
+  expect (code.contains "interface A")
+      --message="Expected A as interface"
+  expect (code.contains "interface B")
+      --message="Expected B as interface"
+  // C is a leaf (not used as parent) → regular class implementing both.
+  expect (code.contains "class C implements A B")
+      --message="Expected C to implement A and B"
+  // No mixins.
+  expect (not code.contains "mixin ")
+      --message="Did not expect any mixin"
+  // C declares all transitive fields directly: shared, a-only, b-only.
+  expect (code.contains "b-only/bool")
+      --message="Expected b-only field on C"
+  expect (code.contains "a-only/int")
+      --message="Expected a-only field on C"
+  // `shared` appears exactly once on C (deduped across A and B).
+  c-body-start := code.index-of "class C implements"
+  c-body := code[c-body-start..]
+  shared-decls := 0
+  c-body.split "\n": | line/string |
+    if (line.trim.starts-with "shared/string"): shared-decls++
+  expect-equals 1 shared-decls
+
+test-oneof-undecidable-no-distinguishing-field:
+  // A discriminator-less oneOf where one variant's properties are a strict
+  // superset of another's. Codegen must fail rather than produce ambiguous
+  // dispatch.
+  schema-json := {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "\$defs": {
+      "Small": {
+        "type": "object",
+        "properties": { "x": { "type": "string" } },
+      },
+      "Big": {
+        "type": "object",
+        "properties": {
+          "x": { "type": "string" },
+          "y": { "type": "string" },
+        },
+      },
+    },
+    "oneOf": [
+      { "\$ref": "#/\$defs/Small" },
+      { "\$ref": "#/\$defs/Big" },
+    ],
+  }
+  err := catch: gen-code schema-json
+  expect (err is string) --message="Expected gen-code to throw"
+  expect ((err as string).contains "cannot statically distinguish")
+      --message="Expected error to mention undistinguishable variant; was: $err"
+
+test-oneof-required-subset-ordered:
+  // Variant A's required ⊂ variant B's required: dispatch checks B (the
+  // superset) first — an input containing all of B's required properties can
+  // only belong to B, so A's weaker check is safe afterwards.
+  schema-json := {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "\$defs": {
+      "A": {
+        "type": "object",
+        "properties": {
+          "shared": { "type": "string" },
+          "a-extra": { "type": "string" },
+        },
+        "required": ["shared"],
+      },
+      "B": {
+        "type": "object",
+        "properties": {
+          "shared": { "type": "string" },
+          "more": { "type": "string" },
+          "b-extra": { "type": "string" },
+        },
+        "required": ["shared", "more"],
+      },
+    },
+    "oneOf": [
+      { "\$ref": "#/\$defs/A" },
+      { "\$ref": "#/\$defs/B" },
+    ],
+  }
+  result := gen-code schema-json
+  code := result["test.toit"]
+  // B's check must test all of its required properties.
+  expect (code.contains "(data.contains \"shared\") and (data.contains \"more\")")
+      --message="Expected conjunction over B's required properties"
+  b-dispatch := code.index-of "return B.from-json"
+  a-dispatch := code.index-of "return A.from-json"
+  expect b-dispatch >= 0 --message="Expected dispatch to B"
+  expect a-dispatch >= 0 --message="Expected dispatch to A"
+  expect b-dispatch < a-dispatch
+      --message="Expected B (required superset) to be checked before A"
+
+test-oneof-catch-all-variant:
+  // A variant without required properties can't be distinguished by a
+  // `contains` check. It is checked last, as an unconditional catch-all.
+  schema-json := {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "\$defs": {
+      "Tagged": {
+        "type": "object",
+        "properties": { "tag": { "type": "string" } },
+        "required": ["tag"],
+      },
+      "Free": {
+        "type": "object",
+        "properties": { "note": { "type": "string" } },
+      },
+    },
+    "oneOf": [
+      { "\$ref": "#/\$defs/Free" },
+      { "\$ref": "#/\$defs/Tagged" },
+    ],
+  }
+  result := gen-code schema-json
+  code := result["test.toit"]
+  tagged-dispatch := code.index-of "return Tagged.from-json"
+  free-dispatch := code.index-of "return Free.from-json"
+  expect tagged-dispatch >= 0 --message="Expected dispatch to Tagged"
+  expect free-dispatch >= 0 --message="Expected dispatch to Free"
+  expect tagged-dispatch < free-dispatch
+      --message="Expected the catch-all variant Free to be checked last"
+  expect (not code.contains "No matching variant")
+      --message="Expected no unreachable throw after the catch-all"
