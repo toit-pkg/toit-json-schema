@@ -39,6 +39,7 @@ main:
   test-oneof-required-subset-ordered
   test-nullable-ref-and-array-null-safe
   test-oneof-catch-all-variant
+  test-required-nullability-and-optional-presence
 
 test-simple-object:
   result := gen-code {
@@ -805,3 +806,36 @@ test-oneof-catch-all-variant:
       --message="Expected the catch-all variant Free to be checked last"
   expect (not code.contains "No matching variant")
       --message="Expected no unreachable throw after the catch-all"
+
+test-required-nullability-and-optional-presence:
+  result := gen-code {
+    "\$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "requiredNullable": { "type": ["string", "null"] },
+      "optionalNullable": { "type": ["string", "null"] },
+      "optionalValue": { "type": "integer" },
+    },
+    "required": ["requiredNullable"],
+  }
+  code := result["test.toit"]
+
+  // Schema nullability is independent of membership in `required`.
+  expect (code.contains "required-nullable/string?\n")
+  // Only nullable optional storage needs a separate final presence bit.
+  expect (code.contains "optional-nullable/string?\n")
+  expect (code.contains "has-optional-nullable/bool\n")
+  expect-not (code.contains "has-optional-value/bool\n")
+  // Parsing records key presence, and serialization only inserts present keys.
+  expect (code.contains "has-optional-nullable = data.contains \"optionalNullable\"")
+  expect (code.contains "if has-optional-nullable:")
+  expect (code.contains "result[\"optionalNullable\"] = optional-nullable")
+  expect (code.contains "if (optional-value != null):")
+  expect (code.contains "result[\"optionalValue\"] = optional-value")
+  expect-not (code.contains "result.remove")
+  // Nullable values require an explicit presence decision. Non-nullable
+  // optional values can infer presence because null is not a valid value.
+  expect (code.contains "--.optional-nullable/string?=null --.has-optional-nullable/bool")
+  expect-not (code.contains "--.has-optional-nullable/bool=")
+  expect (code.contains "--.optional-value/int?=null:")
+  expect-not (code.contains "--has-optional-value")
