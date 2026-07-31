@@ -718,8 +718,9 @@ class PropertyField_:
   name/string
   type/SchemaType
   field/toit-gen.VarDefinition
+  is-required/bool
 
-  constructor .name .type .field:
+  constructor .name .type .field --.is-required:
 
 /**
 A oneOf variant prepared for heuristic (discriminator-less) dispatch.
@@ -776,18 +777,15 @@ class LibraryGen:
 
       is-required := source-type.required != null
           and source-type.required.properties.contains prop-name
-      initial/toit-gen.Expression := is-required
-          ? toit-gen.LateInitialized
-          : toit-gen.Literal null
       field := toit-gen.VarDefinition.field prop-name
           --type=field-type-ref
           --is-nullable=not is-required
-          --initial=initial
-          --is-final=false
+          --initial=null
+          --is-final=true
       if prop-type.description-annotation:
         field.toitdoc = [prop-type.description-annotation.value]
       target.fields.add field
-      result.add (PropertyField_ prop-name prop-type field)
+      result.add (PropertyField_ prop-name prop-type field --is-required=is-required)
       declared.add prop-name
     return result
 
@@ -895,15 +893,33 @@ class LibraryGen:
         --property-fields=property-fields
         --seen={}
 
+    // Generate the public immutable-model constructor. All properties are
+    // named so schema declaration order cannot make a required positional
+    // parameter follow an optional one.
+    if not is-interface:
+      model-parameters := property-fields.map: | prop/PropertyField_ |
+        toit-gen.VarDefinition.field-parameter prop.field
+            --is-named=true
+            --initial=(prop.is-required ? null : toit-gen.Literal null)
+      model-constructor-body := toit-gen.Sequence
+      if one-of-parent-url:
+        model-constructor-body.add
+            toit-gen.Statement (toit-gen.Call toit-gen.Super "from-sub_")
+      model-constructor := toit-gen.Function.constr
+          --parameters=model-parameters
+          model-constructor-body
+      impl-clazz.members.add model-constructor
+
     // Generate from-json constructor on the impl class.
     data-arg := toit-gen.VarDefinition.parameter "data"
         --type=toit-gen.ImportedRef core-import class-manager.map-class
     constructor-body := toit-gen.Sequence
+    gen-constructor-body_ property-fields --data-arg=data-arg --body=constructor-body
     if one-of-parent-url:
-      // OneOf variant: call super.from-sub_ (the abstract base's private constructor).
+      // Final fields must be initialized in the static part of the constructor,
+      // before the explicit super-constructor call.
       constructor-body.add
           toit-gen.Statement (toit-gen.Call toit-gen.Super "from-sub_")
-    gen-constructor-body_ property-fields --data-arg=data-arg --body=constructor-body
     constr := toit-gen.Function.constr --name="from-json" --parameters=[data-arg] constructor-body
     impl-clazz.members.add constr
 
@@ -1203,4 +1219,3 @@ class LibraryGen:
       imp := toit-gen.Import segments
       library.imports.add imp
       imp
-
