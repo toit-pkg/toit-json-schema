@@ -10,6 +10,7 @@ Catches regressions where the generator emits syntactically valid but
 */
 
 import expect show *
+import host
 import host.directory
 import host.file
 import host.pipe
@@ -18,12 +19,8 @@ import json-schema.gen as schema-gen
 
 main args/List:
   toit := args[0]
-  tmp-dir := directory.mkdtemp "/tmp/gen-compile-test-"
-  try:
+  host.with-tmp-directory "/tmp/gen-compile-test-": | tmp-dir |
     test-each toit tmp-dir
-  finally:
-    // Best-effort cleanup; ignored on failure.
-    catch: directory.rmdir --recursive tmp-dir
 
 test-each toit/string tmp-dir/string -> none:
   cases := [
