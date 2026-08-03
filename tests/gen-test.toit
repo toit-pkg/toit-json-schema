@@ -58,9 +58,13 @@ test-simple-object:
   // The generated code should contain a class with name and age fields.
   expect (code.contains "name")
   expect (code.contains "age")
-  // Required fields use late-init; optional fields are nullable.
-  expect (code.contains "name/string := ?")
-  expect (code.contains "age/int? := null")
+  // Generated model fields are immutable and initialized by constructors.
+  expect (code.contains "name/string\n")
+  expect (code.contains "age/int?\n")
+  expect-not (code.contains "name/string :=")
+  expect-not (code.contains "age/int? :=")
+  expect (code.contains "constructor --.name/string --.age/int?=null:")
+      --message="Expected an ordinary immutable-model constructor"
   // Constructor is named from-json.
   expect (code.contains "constructor.from-json")
 
@@ -176,7 +180,7 @@ test-description-toitdoc:
   expect (code.contains "A person object.")
       --message="Expected class toitdoc from description"
   // Field should have a toitdoc comment.
-  expect (code.contains "The person's name.")
+  expect (code.contains "The person\\'s name.")
       --message="Expected field toitdoc from description"
 
 test-to-json:
