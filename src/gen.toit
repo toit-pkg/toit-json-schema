@@ -718,9 +718,10 @@ class PropertyField_:
   name/string
   type/SchemaType
   field/toit-gen.VarDefinition
+  presence-field/toit-gen.VarDefinition?
   is-required/bool
 
-  constructor .name .type .field --.is-required:
+  constructor .name .type .field --.presence-field=null --.is-required:
 
 /**
 A oneOf variant prepared for heuristic (discriminator-less) dispatch.
@@ -779,13 +780,25 @@ class LibraryGen:
           and source-type.required.properties.contains prop-name
       field := toit-gen.VarDefinition.field prop-name
           --type=field-type-ref
-          --is-nullable=not is-required
+          --is-nullable=(not is-required or prop-type.is-type-nullable)
           --initial=null
           --is-final=true
       if prop-type.description-annotation:
         field.toitdoc = [prop-type.description-annotation.value]
       target.fields.add field
-      result.add (PropertyField_ prop-name prop-type field --is-required=is-required)
+      presence-field/toit-gen.VarDefinition? := null
+      // Optional nullable properties need a separate presence bit to
+      // distinguish absence from an explicit null. For optional non-nullable
+      // properties the nullable storage field already encodes absence.
+      if not is-required and prop-type.is-type-nullable:
+        presence-field = toit-gen.VarDefinition.field "has-$prop-name"
+            --type=(toit-gen.ImportedRef core-import class-manager.bool-class)
+            --initial=null
+            --is-final=true
+        target.fields.add presence-field
+      result.add (PropertyField_ prop-name prop-type field
+          --presence-field=presence-field
+          --is-required=is-required)
       declared.add prop-name
     return result
 
@@ -813,12 +826,20 @@ class LibraryGen:
             else:
               toit-gen.Ref qualified.clazz
       body.assign prop.field converted
+      if prop.presence-field:
+        present := toit-gen.Call (toit-gen.Ref data-arg) "contains"
+            --arguments=[toit-gen.Literal prop.name]
+        body.assign prop.presence-field present
 
   /**
-  Appends to-json map entries for $property-fields (one entry per property).
+  Appends to-json map entries for required $property-fields.
+
+  Optional properties are inserted conditionally after the map is created, so
+    absent properties are never added to it.
   */
-  gen-to-json-entries_ property-fields/List --keys/List --values/List -> none:
+  gen-required-to-json-entries_ property-fields/List --keys/List --values/List -> none:
     property-fields.do: | prop/PropertyField_ |
+      if not prop.is-required: continue.do
       field-ref := toit-gen.Ref prop.field
       converted := prop.type.convert-to-json field-ref --nullable=prop.field.is-nullable
       keys.add (toit-gen.Literal prop.name)
@@ -897,10 +918,16 @@ class LibraryGen:
     // named so schema declaration order cannot make a required positional
     // parameter follow an optional one.
     if not is-interface:
-      model-parameters := property-fields.map: | prop/PropertyField_ |
-        toit-gen.VarDefinition.field-parameter prop.field
+      model-parameters := []
+      property-fields.do: | prop/PropertyField_ |
+        field-parameter := toit-gen.VarDefinition.field-parameter prop.field
             --is-named=true
             --initial=(prop.is-required ? null : toit-gen.Literal null)
+        model-parameters.add field-parameter
+        if prop.presence-field:
+          model-parameters.add (toit-gen.VarDefinition.field-parameter prop.presence-field
+              --is-named=true
+              --initial=null)
       model-constructor-body := toit-gen.Sequence
       if one-of-parent-url:
         model-constructor-body.add
@@ -927,9 +954,23 @@ class LibraryGen:
     to-json-body := toit-gen.Sequence
     map-keys := []
     map-values := []
-    gen-to-json-entries_ property-fields --keys=map-keys --values=map-values
+    gen-required-to-json-entries_ property-fields --keys=map-keys --values=map-values
     map-literal := toit-gen.MapLiteral map-keys map-values
-    to-json-body.ret map-literal
+    result-map := to-json-body.define "result" map-literal
+    property-fields.do: | prop/PropertyField_ |
+      if prop.is-required: continue.do
+      field-ref := toit-gen.Ref prop.field
+      converted := prop.type.convert-to-json field-ref --nullable=prop.field.is-nullable
+      add-body := toit-gen.Sequence
+      add-body.add (toit-gen.Statement (toit-gen.IndexAssign
+          (toit-gen.Ref result-map)
+          (toit-gen.Literal prop.name)
+          converted))
+      present/toit-gen.Expression := prop.presence-field
+          ? toit-gen.Ref prop.presence-field
+          : toit-gen.Binary field-ref "!=" (toit-gen.Literal null)
+      to-json-body.iff present add-body
+    to-json-body.ret (toit-gen.Ref result-map)
     to-json-map-ref := toit-gen.ImportedRef core-import class-manager.map-class
     to-json-method := toit-gen.Function "to-json"
         --parameters=[]
@@ -1039,6 +1080,13 @@ class LibraryGen:
           --is-abstract
           null
       itf.members.add getter
+      if prop.presence-field:
+        presence-getter := toit-gen.Function prop.presence-field.preferred-name
+            --parameters=[]
+            --return-type=prop.presence-field.type
+            --is-abstract
+            null
+        itf.members.add presence-getter
     // Factory: constructor.from-json data/Map -> Itf  (return Impl_.from-json data)
     data-arg := toit-gen.VarDefinition.parameter "data"
         --type=toit-gen.ImportedRef core-import class-manager.map-class
