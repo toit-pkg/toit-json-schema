@@ -4,7 +4,7 @@ dependencies:
     version: ^2.6.0
   host:
     url: github.com/toitlang/pkg-host
-    version: ^1.16.2
+    version: ^1.19.0
   json-schema:
     path: ..
   toit-gen:
