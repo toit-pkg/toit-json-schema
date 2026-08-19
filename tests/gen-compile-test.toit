@@ -117,6 +117,32 @@ test-each toit/string tmp-dir/string -> none:
         },
       },
     }],
+    ["core-name-shadowing", {
+      "\$defs": {
+        "Map": {
+          "type": "object",
+          "properties": { "value": { "type": "string" } },
+        },
+        "List": {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": { "\$ref": "#/\$defs/Map" },
+            },
+          },
+        },
+      },
+      "type": "object",
+      "properties": {
+        "map": { "\$ref": "#/\$defs/Map" },
+        "list": { "\$ref": "#/\$defs/List" },
+        "lookup": {
+          "type": "object",
+          "additionalProperties": { "type": "integer" },
+        },
+      },
+    }],
   ]
 
   cases.do: | pair/List |
