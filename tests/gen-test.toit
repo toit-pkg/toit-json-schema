@@ -15,6 +15,7 @@ gen-code schema-json/Map --module/string="test.toit" -> Map:
 
 main:
   test-simple-object
+  test-core-name-shadowing
   test-nested-object
   test-circular-ref
   test-additional-properties-object
@@ -60,14 +61,51 @@ test-simple-object:
   expect (code.contains "name")
   expect (code.contains "age")
   // Generated model fields are immutable and initialized by constructors.
-  expect (code.contains "name/string\n")
-  expect (code.contains "age/int?\n")
-  expect-not (code.contains "name/string :=")
-  expect-not (code.contains "age/int? :=")
-  expect (code.contains "constructor --.name/string --.age/int?=null:")
+  expect (code.contains "name/core.string\n")
+  expect (code.contains "age/core.int?\n")
+  expect-not (code.contains "name/core.string :=")
+  expect-not (code.contains "age/core.int? :=")
+  expect (code.contains "constructor --.name/core.string --.age/core.int?=null:")
       --message="Expected an ordinary immutable-model constructor"
   // Constructor is named from-json.
   expect (code.contains "constructor.from-json")
+
+test-core-name-shadowing:
+  result := gen-code {
+    "\$defs": {
+      "Map": {
+        "type": "object",
+        "properties": { "value": { "type": "string" } },
+      },
+      "List": {
+        "type": "object",
+        "properties": {
+          "values": {
+            "type": "array",
+            "items": { "\$ref": "#/\$defs/Map" },
+          },
+        },
+      },
+    },
+    "type": "object",
+    "properties": {
+      "map": { "\$ref": "#/\$defs/Map" },
+      "list": { "\$ref": "#/\$defs/List" },
+      "lookup": {
+        "type": "object",
+        "additionalProperties": { "type": "integer" },
+      },
+    },
+  }
+  code := result["test.toit"]
+  expect (code.contains "import core")
+      --message="Expected generated models to import core behind a prefix"
+  expect (code.contains "class Map")
+  expect (code.contains "class List")
+  expect (code.contains "core.Map")
+      --message="Expected the core Map type to remain qualified"
+  expect (code.contains "core.List")
+      --message="Expected the core List type to remain qualified"
 
 test-nested-object:
   // Tests that nested object properties reference the correct class
@@ -204,7 +242,7 @@ test-to-json:
   expect (code.contains "to-json")
       --message="Expected a to-json method"
   // The to-json method should return a Map.
-  expect (code.contains "to-json -> Map")
+  expect (code.contains "to-json -> core.Map")
       --message="Expected to-json to return Map"
   // Nested objects should have .to-json called on them.
   expect (code.contains ".to-json")
@@ -252,9 +290,9 @@ test-mixin-for-allof:
   // Dog is a leaf class — implements Pet directly with all fields.
   expect (code.contains "class Dog implements Pet")
       --message="Expected Dog to implement Pet via allOf"
-  expect (code.contains "name/string")
+  expect (code.contains "name/core.string")
       --message="Expected Dog to declare name (transitive from Pet)"
-  expect (code.contains "bark/string")
+  expect (code.contains "bark/core.string")
       --message="Expected Dog to have bark field (from inline allOf)"
 
 test-oneof-discriminator:
@@ -426,7 +464,7 @@ test-oneof-with-allof-variants:
   expect (code.contains "class PetImpl_")
       --message="Expected private PetImpl_ class"
   // Dog should have its own fields.
-  expect (code.contains "bark/string")
+  expect (code.contains "bark/core.string")
       --message="Expected Dog to have bark field"
 
 test-nullable-type-union:
@@ -439,7 +477,7 @@ test-nullable-type-union:
     },
   }
   code := result["test.toit"]
-  expect (code.contains "name/string")
+  expect (code.contains "name/core.string")
       --message="Expected nullable string union to resolve to string"
   expect (not code.contains "name/any")
       --message="Nullable union should not degrade to any"
@@ -455,9 +493,9 @@ test-numeric-type-union:
     },
   }
   code := result["test.toit"]
-  expect (code.contains "amount/num")
+  expect (code.contains "amount/core.num")
       --message="Expected numeric union to resolve to num"
-  expect (code.contains "amount-or-null/num")
+  expect (code.contains "amount-or-null/core.num")
       --message="Expected numeric+null union to resolve to num"
 
 test-incompatible-type-union:
@@ -486,11 +524,11 @@ test-kebab-case-property:
     },
   }
   code := result["test.toit"]
-  expect (code.contains "user-name/string")
+  expect (code.contains "user-name/core.string")
       --message="Expected kebab-cased Toit field"
-  expect (code.contains "last-modified/string")
+  expect (code.contains "last-modified/core.string")
       --message="Expected camelCase property normalized to kebab-case"
-  expect (code.contains "is-admin/bool")
+  expect (code.contains "is-admin/core.bool")
       --message="Expected snake_case property normalized to kebab-case"
   // from-json reads using the original JSON key (not the Toit field name).
   // Nullable fields use data.get so a missing key resolves to null.
@@ -651,16 +689,16 @@ test-allof-multiple-refs-with-overlap:
   expect (not code.contains "mixin ")
       --message="Did not expect any mixin"
   // C declares all transitive fields directly: shared, a-only, b-only.
-  expect (code.contains "b-only/bool")
+  expect (code.contains "b-only/core.bool")
       --message="Expected b-only field on C"
-  expect (code.contains "a-only/int")
+  expect (code.contains "a-only/core.int")
       --message="Expected a-only field on C"
   // `shared` appears exactly once on C (deduped across A and B).
   c-body-start := code.index-of "class C implements"
   c-body := code[c-body-start..]
   shared-decls := 0
   c-body.split "\n": | line/string |
-    if (line.trim.starts-with "shared/string"): shared-decls++
+    if (line.trim.starts-with "shared/core.string"): shared-decls++
   expect-equals 1 shared-decls
 
 test-oneof-undecidable-no-distinguishing-field:
@@ -821,11 +859,11 @@ test-required-nullability-and-optional-presence:
   code := result["test.toit"]
 
   // Schema nullability is independent of membership in `required`.
-  expect (code.contains "required-nullable/string?\n")
+  expect (code.contains "required-nullable/core.string?\n")
   // Only nullable optional storage needs a separate final presence bit.
-  expect (code.contains "optional-nullable/string?\n")
-  expect (code.contains "has-optional-nullable/bool\n")
-  expect-not (code.contains "has-optional-value/bool\n")
+  expect (code.contains "optional-nullable/core.string?\n")
+  expect (code.contains "has-optional-nullable/core.bool\n")
+  expect-not (code.contains "has-optional-value/core.bool\n")
   // Parsing records key presence, and serialization only inserts present keys.
   expect (code.contains "has-optional-nullable = data.contains \"optionalNullable\"")
   expect (code.contains "if has-optional-nullable:")
@@ -835,7 +873,7 @@ test-required-nullability-and-optional-presence:
   expect-not (code.contains "result.remove")
   // Nullable values require an explicit presence decision. Non-nullable
   // optional values can infer presence because null is not a valid value.
-  expect (code.contains "--.optional-nullable/string?=null --.has-optional-nullable/bool")
-  expect-not (code.contains "--.has-optional-nullable/bool=")
-  expect (code.contains "--.optional-value/int?=null:")
+  expect (code.contains "--.optional-nullable/core.string?=null --.has-optional-nullable/core.bool")
+  expect-not (code.contains "--.has-optional-nullable/core.bool=")
+  expect (code.contains "--.optional-value/core.int?=null:")
   expect-not (code.contains "--has-optional-value")

@@ -389,7 +389,8 @@ class SchemaType:
           toit-gen.Statement element-conversion
       return wrap-null-safe_ expr (toit-gen.Call expr "map" --arguments=[block]) --nullable=nullable
     if is-map:
-      return wrap-null-safe_ expr (toit-gen.As expr class-manager.map-class) --nullable=nullable
+      map-ref/toit-gen.Ref := gen-ref.call this
+      return wrap-null-safe_ expr (toit-gen.As expr map-ref) --nullable=nullable
     self-ref/toit-gen.Ref := gen-ref.call this
     call := toit-gen.Call self-ref "from-json" --arguments=[expr]
     return wrap-null-safe_ expr call --nullable=nullable
@@ -746,8 +747,7 @@ class LibraryGen:
 
   constructor .library --run/Generator_:
     run_ = run
-    core-import = toit-gen.Import ["core"]
-    library.imports.add core-import
+    core-import = library.add-core-import
 
   class-manager -> ClassManager:
     return run_.class-manager
@@ -825,11 +825,11 @@ class LibraryGen:
               toit-gen.ImportedRef imp qualified.clazz
             else:
               toit-gen.Ref qualified.clazz
-      body.assign prop.field converted
+      body.assign (toit-gen.Ref prop.field) converted
       if prop.presence-field:
         present := toit-gen.Call (toit-gen.Ref data-arg) "contains"
             --arguments=[toit-gen.Literal prop.name]
-        body.assign prop.presence-field present
+        body.assign (toit-gen.Ref prop.presence-field) present
 
   /**
   Appends to-json map entries for required $property-fields.
